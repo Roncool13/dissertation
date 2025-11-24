@@ -79,21 +79,19 @@ as inputs to a meta-model to produce the final decision.
 ---
 
 ## 📂 Repository Structure
+```text
 project/
-│
 ├── pipeline.ipynb               # Data pipeline notebook (complete)
 ├── data/
 │   └── ohlcv_ml_ready.parquet   # Generated ML-ready dataset
-│
 ├── models/
 │   ├── tabular/                 # Tabular ML models (future)
 │   ├── vision/                  # CNN candlestick models (future)
 │   └── structure/               # Swing/structure sequence models (future)
-│
 ├── fusion/
 │   └── meta_model.py            # Late-fusion model (future)
-│
 └── README.md                    # This file
+```
 
 ---
 
