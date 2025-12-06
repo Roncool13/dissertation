@@ -1,5 +1,9 @@
-import boto3
+# src/connections.py
+# Standard library imports
 from zipfile import Path
+
+# Third party imports
+import boto3
 
 
 class S3Connection:

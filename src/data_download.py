@@ -1,7 +1,10 @@
 # src/data/ohlcv_download.py
+
+# Standard library imports
 import datetime as dt
 from typing import List
 
+# Third-party imports
 import pandas as pd
 from jugaad_data.nse import stock_df
 

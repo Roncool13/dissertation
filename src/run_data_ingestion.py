@@ -1,11 +1,14 @@
 # src/pipelines/run_ohlcv_ingestion.py
+
+# Standard library imports
+import re
 import argparse
 import datetime as dt
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
+# Local imports
 from data_download import download_ohlcv_nsepy
 from data_clean import clean_ohlcv
 from constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
