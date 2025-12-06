@@ -1,18 +1,20 @@
 # src/pipelines/run_ohlcv_ingestion.py
 
 # Standard library imports
-import re
 import argparse
 import datetime as dt
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 # Local imports
-from data_download import download_ohlcv_nsepy
-from data_clean import clean_ohlcv
+from config import setup_logging
 from constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
-from connections import S3Connection
+from dissertation.src.core.data_download import download_ohlcv_nsepy
+from dissertation.src.core.data_clean import clean_ohlcv
+from dissertation.src.io.connections import S3Connection
 
 
 @dataclass
@@ -48,6 +50,7 @@ class OHLCVIngestor:
     Encapsulates the OHLCV ingestion pipeline.
     """
 
+    logger = logging.getLogger(__name__)
     YEAR_KEY_PATTERN = re.compile(r"/(?P<symbol>[^/]+)/(?P<year>\d{4})/ohlcv\.parquet$")
 
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
@@ -88,7 +91,12 @@ class OHLCVIngestor:
         remaining_prefixes: List[str] = []
         for y, key in zip(years, prefixes):
             if self.s3.exists(key):
-                print(f"[SKIP] S3 object already exists: s3://{self.config.s3_bucket}/{key} (year={y})")
+                self.logger.info(
+                    "S3 object already exists; skipping upload for year=%s at s3://%s/%s",
+                    y,
+                    self.config.s3_bucket,
+                    key,
+                )
             else:
                 remaining_years.append(y)
                 remaining_prefixes.append(key)
@@ -99,11 +107,11 @@ class OHLCVIngestor:
     def ingest_year(self, year: int, key: str) -> None:
         start = dt.date(year, 1, 1)
         end = dt.date(year, 12, 31)
-        print(f"[INFO] Downloading OHLCV for {self.config.symbol} from {start} to {end}...")
+        self.logger.info("Downloading OHLCV for %s from %s to %s...", self.config.symbol, start, end)
         df = download_ohlcv_nsepy(self.config.symbol, start, end)
-        print(f"[INFO] Downloaded {len(df)} rows. Cleaning data...")
+        self.logger.info("Downloaded %s rows. Cleaning data...", len(df))
         df = clean_ohlcv(df)
-        print(f"[INFO] Cleaned data has {len(df)} rows. Saving and uploading to S3...")
+        self.logger.info("Cleaned data has %s rows. Saving and uploading to S3...", len(df))
 
         # Ensure local dir exists
         self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +119,7 @@ class OHLCVIngestor:
         # save_to_parquet(df, self.config.local_output)
 
         self.s3.upload(self.config.local_output, key)
-        print(f"[OK] Uploaded to s3://{self.config.s3_bucket}/{key}")
+        self.logger.info("Uploaded to s3://%s/%s", self.config.s3_bucket, key)
 
     def run(self) -> None:
         # Validate inputs first
@@ -121,14 +129,14 @@ class OHLCVIngestor:
 
         years_to_process, prefixes = self.prepare_year_prefixes()
         if not prefixes:
-            print("[INFO] All OHLCV data already exists in S3. Nothing to ingest.")
+            self.logger.info("All OHLCV data already exists in S3. Nothing to ingest.")
             return
 
-        print(f"[INFO] Need to ingest OHLCV data for {len(prefixes)} year(s).")
+        self.logger.info("Need to ingest OHLCV data for %s year(s).", len(prefixes))
         for year, key in zip(years_to_process, prefixes):
             self.ingest_year(year, key)
 
-        print("[DONE] OHLCV ingestion complete.")
+        self.logger.info("OHLCV ingestion complete.")
 
 
 # ---- CLI ----
@@ -143,6 +151,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    setup_logging()
     args = parse_args(argv)
 
     symbol = args.symbol.strip().upper()
