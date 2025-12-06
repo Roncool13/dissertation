@@ -14,11 +14,11 @@ from typing import Callable, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
-from dissertation.src.config import setup_logging
-from dissertation.src.constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
-from dissertation.src.core.data_download import download_ohlcv_nsepy
-from dissertation.src.core.data_clean import clean_ohlcv
-from dissertation.src.io.connections import S3Connection
+from src.config import setup_logging
+from src.constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
+from src.core.data_download import download_ohlcv_nsepy
+from src.core.data_clean import clean_ohlcv
+from src.io.connections import S3Connection
 
 
 @dataclass
