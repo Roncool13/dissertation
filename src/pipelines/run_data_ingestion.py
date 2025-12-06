@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 # Local imports
-from config import setup_logging
-from constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
+from dissertation.src.config import setup_logging
+from dissertation.src.constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
 from dissertation.src.core.data_download import download_ohlcv_nsepy
 from dissertation.src.core.data_clean import clean_ohlcv
 from dissertation.src.io.connections import S3Connection
