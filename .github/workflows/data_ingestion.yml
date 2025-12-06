@@ -51,6 +51,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Run OHLCV ingestion
+        env: 
+          PYTHONUNBUFFERED: 1
         run: |
           python src/run_data_ingestion.py \
             --symbol "${{ inputs.symbol }}" \
