@@ -54,7 +54,7 @@ jobs:
         env: 
           PYTHONUNBUFFERED: 1
         run: |
-          python src/run_data_ingestion.py \
+          python src/pipelines/run_data_ingestion.py \
             --symbol "${{ inputs.symbol }}" \
             --start "${{ inputs.start }}" \
             --end "${{ inputs.end }}" \
