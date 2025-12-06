@@ -5,9 +5,13 @@ import argparse
 import datetime as dt
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
+
+# Add parent directory to path for local imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
 from dissertation.src.config import setup_logging
