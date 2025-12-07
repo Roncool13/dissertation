@@ -80,7 +80,7 @@ class OHLCVIngestor:
     @staticmethod
     def _s3_object_key(prefix: str, symbol: str, year: int) -> str:
         # store per-year under prefix/{symbol}/{year}/ohlcv.parquet
-        return f"{prefix}/symbol={symbol}/start={dt.date(year,1,1)}/end={dt.date(year,12,31)}/ohlcv.parquet"
+        return f"{prefix}/{symbol}/{year}/ohlcv.parquet"
 
     # ---- S3 checking / listing ----
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
