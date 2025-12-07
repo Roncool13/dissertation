@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.config import setup_logging
 from src.constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
 from src.core.data_download import download_ohlcv_nsepy
-from src.core.data_clean import clean_ohlcv
+from src.core.data_clean import clean_ohlcv_data
 from src.io.connections import S3Connection
 
 
@@ -114,7 +114,7 @@ class OHLCVIngestor:
         self.logger.info("Downloading OHLCV for %s from %s to %s...", self.config.symbol, start, end)
         df = download_ohlcv_nsepy(self.config.symbol, start, end)
         self.logger.info("Downloaded %s rows. Cleaning data...", len(df))
-        df = clean_ohlcv(df)
+        df = clean_ohlcv_data(df)
         self.logger.info("Cleaned data has %s rows. Saving and uploading to S3...", len(df))
 
         # Ensure local dir exists
