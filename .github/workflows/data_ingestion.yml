@@ -1,4 +1,4 @@
-name: Data Ingestion – OHLCV
+name: Data Ingestion – OHLCV + News
 
 on:
   workflow_dispatch:
@@ -6,19 +6,38 @@ on:
       symbol:
         description: "Single NSE symbol to ingest (e.g. TCS)"
         required: true
+        type: string
+
       start:
         description: "Start year (YYYY)"
         required: true
+        type: string
+
       end:
         description: "End year (YYYY)"
         required: true
+        type: string
+
       local_output:
-        description: "Local parquet output path"
+        description: "Local parquet output path (used as temp stem)"
         required: false
-        default: "/tmp/ohlcv.parquet"
+        default: "/tmp/ingest.parquet"
+        type: string
+
+      ingest_ohlcv:
+        description: "Ingest OHLCV data"
+        required: true
+        default: true
+        type: boolean
+
+      ingest_news:
+        description: "Ingest News + Relevance data"
+        required: true
+        default: true
+        type: boolean
 
 jobs:
-  ingest-ohlcv:
+  ingest:
     runs-on: ubuntu-latest
     environment: production
 
@@ -50,13 +69,28 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Run OHLCV ingestion
-        env: 
+      - name: Run ingestion
+        env:
           PYTHONUNBUFFERED: 1
         run: |
-          python src/pipelines/run_data_ingestion.py \
-            --symbol "${{ inputs.symbol }}" \
-            --start "${{ inputs.start }}" \
-            --end "${{ inputs.end }}" \
-            --local-output "${{ inputs.local_output }}" \
-            --s3-bucket "$S3_BUCKET"
+          CMD="python src/pipelines/run_data_ingestion.py \
+            --symbol '${{ inputs.symbol }}' \
+            --start '${{ inputs.start }}' \
+            --end '${{ inputs.end }}' \
+            --local-output '${{ inputs.local_output }}' \
+            --s3-bucket '$S3_BUCKET'"
+
+          # Your script supports:
+          #   --ohlcv-only  => disables news
+          #   --news-only   => disables ohlcv
+          if [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_news }}" = "true" ]; then
+            CMD="$CMD --news-only"
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "true" ]; then
+            CMD="$CMD --ohlcv-only"
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "false" ]; then
+            echo "ERROR: Both ingest_ohlcv and ingest_news are false. Nothing to run."
+            exit 1
+          fi
+
+          echo "Running: $CMD"
+          eval "$CMD"
