@@ -1,6 +1,9 @@
 boto3
+jugaad-data
+feedparser
 numpy
 pandas
 pyarrow
+sentence-transformers>=2.2.2
+torch
 tqdm
-jugaad-data
