@@ -4,21 +4,29 @@
 import argparse
 import datetime as dt
 import logging
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
+
+import pandas as pd
 
 # Add parent directory to path for local imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
 from src.config import setup_logging
-from src.constants import NSE_SYMBOLS, S3_BUCKET, OHLCV_S3_PREFIX
-from src.core.data_download import download_ohlcv_nsepy
-from src.core.data_clean import clean_ohlcv_data
+from src.constants import (
+    NSE_SYMBOLS,
+    S3_BUCKET,
+    OHLCV_S3_PREFIX,
+    NEWS_CLEAN_S3_PREFIX,
+    NEWS_REL_S3_PREFIX,
+)
+from src.core.data_download import download_ohlcv_nsepy, fetch_news_from_provider
+from src.core.data_clean import clean_ohlcv_data, clean_news_data
 from src.io.connections import S3Connection
+from src.nlp.relevance_scoring import RelevanceScorer
 
 
 @dataclass
@@ -28,7 +36,11 @@ class IngestConfig:
     end_year: int
     local_output: Path
     s3_bucket: str
-    s3_prefix: str = OHLCV_S3_PREFIX
+
+    # Prefixes
+    ohlcv_prefix: str = OHLCV_S3_PREFIX
+    news_clean_prefix: str = NEWS_CLEAN_S3_PREFIX
+    news_rel_prefix: str = NEWS_REL_S3_PREFIX
 
 
 class S3Client:
@@ -39,7 +51,6 @@ class S3Client:
 
     def __init__(self, bucket: str, conn_factory: Callable[[str], object] = S3Connection):
         self.bucket = bucket
-        # conn_factory(bucket) should implement .object_exists(key) and .upload_file(local, key)
         self._conn = conn_factory(bucket)
 
     def exists(self, key: str) -> bool:
@@ -55,14 +66,11 @@ class OHLCVIngestor:
     """
 
     logger = logging.getLogger(__name__)
-    YEAR_KEY_PATTERN = re.compile(r"/(?P<symbol>[^/]+)/(?P<year>\d{4})/ohlcv\.parquet$")
 
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
-        # create a local client bound to the configured bucket
         self.s3 = s3_client_factory(config.s3_bucket)
 
-    # ---- Validation helpers ----
     @staticmethod
     def validate_year_arg(arg: str) -> int:
         if not isinstance(arg, str) or len(arg) != 4 or not arg.isdigit():
@@ -79,78 +87,202 @@ class OHLCVIngestor:
 
     @staticmethod
     def _s3_object_key(prefix: str, symbol: str, year: int) -> str:
-        # store per-year under prefix/{symbol}/{year}/ohlcv.parquet
         return f"{prefix}/{symbol}/{year}/ohlcv.parquet"
 
-    # ---- S3 checking / listing ----
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
-        """
-        Build a list of candidate object keys for each year and return (year_list, prefixes_to_process)
-        where year_list contains the years corresponding to prefixes_to_process.
-        """
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        prefixes = [self._s3_object_key(self.config.s3_prefix, self.config.symbol, y) for y in years]
+        keys = [self._s3_object_key(self.config.ohlcv_prefix, self.config.symbol, y) for y in years]
 
         remaining_years: List[int] = []
-        remaining_prefixes: List[str] = []
-        for y, key in zip(years, prefixes):
+        remaining_keys: List[str] = []
+        for y, key in zip(years, keys):
             if self.s3.exists(key):
-                self.logger.info(
-                    "S3 object already exists; skipping upload for year=%s at s3://%s/%s",
-                    y,
-                    self.config.s3_bucket,
-                    key,
-                )
+                self.logger.info("OHLCV exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
             else:
                 remaining_years.append(y)
-                remaining_prefixes.append(key)
+                remaining_keys.append(key)
 
-        return remaining_years, remaining_prefixes
+        return remaining_years, remaining_keys
 
-    # ---- Ingestion ----
     def ingest_year(self, year: int, key: str) -> None:
         start = dt.date(year, 1, 1)
         end = dt.date(year, 12, 31)
+
         self.logger.info("Downloading OHLCV for %s from %s to %s...", self.config.symbol, start, end)
         df = download_ohlcv_nsepy(self.config.symbol, start, end)
         self.logger.info("Downloaded %s rows. Cleaning data...", len(df))
+
         df = clean_ohlcv_data(df)
-        self.logger.info("Cleaned data has %s rows. Saving and uploading to S3...", len(df))
+        if df.empty:
+            raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year}")
 
-        # Ensure local dir exists
+        self.logger.info("Cleaned OHLCV has %s rows. Saving and uploading to S3...", len(df))
         self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(self.config.local_output, index=False)
-        # save_to_parquet(df, self.config.local_output)
 
-        self.s3.upload(self.config.local_output, key)
-        self.logger.info("Uploaded to s3://%s/%s", self.config.s3_bucket, key)
+        local_path = self.config.local_output.with_name(
+            f"{self.config.local_output.stem}_{self.config.symbol}_{year}_ohlcv.parquet"
+        )
+        df.to_parquet(local_path, index=False)
+        self.s3.upload(local_path, key)
+        self.logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_bucket, key)
 
     def run(self) -> None:
-        # Validate inputs first
         self.validate_symbol(self.config.symbol)
         if self.config.start_year > self.config.end_year:
             raise ValueError("Start year cannot be after end year.")
 
-        years_to_process, prefixes = self.prepare_year_prefixes()
-        if not prefixes:
+        years_to_process, keys = self.prepare_year_prefixes()
+        if not keys:
             self.logger.info("All OHLCV data already exists in S3. Nothing to ingest.")
             return
 
-        self.logger.info("Need to ingest OHLCV data for %s year(s).", len(prefixes))
-        for year, key in zip(years_to_process, prefixes):
+        self.logger.info("Need to ingest OHLCV data for %s year(s).", len(keys))
+        for year, key in zip(years_to_process, keys):
             self.ingest_year(year, key)
 
         self.logger.info("OHLCV ingestion complete.")
 
 
+class NewsIngestor:
+    """
+    News ingestion pipeline:
+      - Fetch Google News RSS
+      - Clean
+      - Semantic relevance scoring
+      - Upload clean + clean+relevance to S3
+    """
+
+    logger = logging.getLogger(__name__)
+
+    def __init__(
+        self,
+        config: IngestConfig,
+        s3_client_factory: Callable[[str], S3Client] = S3Client,
+        scorer: Optional[RelevanceScorer] = None,
+    ):
+        self.config = config
+        self.s3 = s3_client_factory(config.s3_bucket)
+        self.scorer = scorer or RelevanceScorer()
+
+    @staticmethod
+    def _s3_clean_key(prefix: str, symbol: str, year: int) -> str:
+        return f"{prefix}/{symbol}/{year}/news_clean.parquet"
+
+    @staticmethod
+    def _s3_rel_key(prefix: str, symbol: str, year: int) -> str:
+        return f"{prefix}/{symbol}/{year}/news_rel.parquet"
+
+    def prepare_year_prefixes(self) -> Tuple[List[int], List[str], List[str]]:
+        years = list(range(self.config.start_year, self.config.end_year + 1))
+        clean_keys = [self._s3_clean_key(self.config.news_clean_prefix, self.config.symbol, y) for y in years]
+        rel_keys = [self._s3_rel_key(self.config.news_rel_prefix, self.config.symbol, y) for y in years]
+
+        remaining_years: List[int] = []
+        remaining_clean: List[str] = []
+        remaining_rel: List[str] = []
+
+        for y, ck, rk in zip(years, clean_keys, rel_keys):
+            # If relevance layer exists, consider year done
+            if self.s3.exists(rk):
+                self.logger.info("NEWS+REL exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, rk)
+            else:
+                remaining_years.append(y)
+                remaining_clean.append(ck)
+                remaining_rel.append(rk)
+
+        return remaining_years, remaining_clean, remaining_rel
+
+    def ingest_year(self, year: int, clean_key: str, rel_key: str) -> None:
+        start = dt.date(year, 1, 1)
+        end = dt.date(year, 12, 31)
+
+        self.logger.info("Fetching NEWS for %s from %s to %s...", self.config.symbol, start, end)
+        raw = fetch_news_from_provider(self.config.symbol, start, end)
+
+        self.logger.info("Fetched %s raw news rows. Cleaning...", len(raw))
+        news_clean = clean_news_data(raw, self.config.symbol, start, end)
+
+        self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
+
+        local_clean = self.config.local_output.with_name(
+            f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_clean.parquet"
+        )
+        news_clean.to_parquet(local_clean, index=False)
+        self.s3.upload(local_clean, clean_key)
+        self.logger.info("Uploaded NEWS clean to s3://%s/%s", self.config.s3_bucket, clean_key)
+
+        # relevance scoring
+        if news_clean.empty:
+            news_rel = news_clean.copy()
+            news_rel["relevance_score"] = pd.Series(dtype="float32")
+        else:
+            scores = self.scorer.score(
+                symbol=self.config.symbol,
+                headlines=news_clean["headline"].astype(str).tolist(),
+                summaries=news_clean["summary"].astype(str).tolist()
+                if "summary" in news_clean.columns
+                else None,
+            )
+            news_rel = news_clean.copy()
+            news_rel["relevance_score"] = scores.astype("float32")
+
+        local_rel = self.config.local_output.with_name(
+            f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_rel.parquet"
+        )
+        news_rel.to_parquet(local_rel, index=False)
+        self.s3.upload(local_rel, rel_key)
+        self.logger.info("Uploaded NEWS+REL to s3://%s/%s", self.config.s3_bucket, rel_key)
+
+    def run(self) -> None:
+        if self.config.start_year > self.config.end_year:
+            raise ValueError("Start year cannot be after end year.")
+
+        years, clean_keys, rel_keys = self.prepare_year_prefixes()
+        if not rel_keys:
+            self.logger.info("All NEWS+REL data already exists in S3. Nothing to ingest.")
+            return
+
+        self.logger.info("Need to ingest NEWS+REL data for %s year(s).", len(rel_keys))
+        for y, ck, rk in zip(years, clean_keys, rel_keys):
+            self.ingest_year(y, ck, rk)
+
+        self.logger.info("News ingestion complete.")
+
+
+class MultiModalIngestor:
+    """
+    Orchestrates running OHLCV ingestion and News ingestion sequentially
+    with the same CLI inputs (symbol, start, end).
+    """
+
+    logger = logging.getLogger(__name__)
+
+    def __init__(self, config: IngestConfig):
+        self.config = config
+
+    def run(self, run_ohlcv: bool = True, run_news: bool = True) -> None:
+        # Validate inputs once here
+        OHLCVIngestor.validate_symbol(self.config.symbol)
+
+        if run_ohlcv:
+            OHLCVIngestor(self.config).run()
+
+        if run_news:
+            NewsIngestor(self.config).run()
+
+        self.logger.info("Multi-modal ingestion finished. (OHLCV=%s, NEWS=%s)", run_ohlcv, run_news)
+
+
 # ---- CLI ----
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run OHLCV ingestion pipeline.")
+    parser = argparse.ArgumentParser(description="Run multi-modal ingestion pipeline (OHLCV + News + Relevance).")
     parser.add_argument("--symbol", type=str, required=True, help="Single NSE symbol to ingest (e.g. TCS).")
     parser.add_argument("--start", type=str, required=True, help="Start year YYYY")
     parser.add_argument("--end", type=str, required=True, help="End year YYYY")
-    parser.add_argument("--local-output", type=str, default="/tmp/ohlcv.parquet", help="Local temp parquet file")
+    parser.add_argument("--local-output", type=str, default="/tmp/ingest.parquet", help="Local temp parquet stem")
     parser.add_argument("--s3-bucket", type=str, default=S3_BUCKET, help="S3 bucket name")
+    parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
+    parser.add_argument("--news-only", action="store_true", help="Only ingest news + relevance.")
     return parser.parse_args(argv)
 
 
@@ -162,6 +294,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     start_year = OHLCVIngestor.validate_year_arg(args.start)
     end_year = OHLCVIngestor.validate_year_arg(args.end)
 
+    run_ohlcv = True
+    run_news = True
+    if args.ohlcv_only:
+        run_news = False
+    if args.news_only:
+        run_ohlcv = False
+
     config = IngestConfig(
         symbol=symbol,
         start_year=start_year,
@@ -170,8 +309,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         s3_bucket=args.s3_bucket,
     )
 
-    ingestor = OHLCVIngestor(config)
-    ingestor.run()
+    MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news)
 
 
 if __name__ == "__main__":
