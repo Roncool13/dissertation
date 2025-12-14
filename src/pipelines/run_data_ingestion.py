@@ -260,7 +260,15 @@ class MultiModalIngestor:
     def __init__(self, config: IngestConfig):
         self.config = config
 
-    def run(self, run_ohlcv: bool = True, run_news: bool = True) -> None:
+    def run(self, run_ohlcv: bool = True, run_news: bool = True, log_level: Optional[str] = None) -> None:
+        setup_logging(log_level)
+        self.logger.info(
+            "Starting multi-modal ingestion for %s (years %s-%s) with log level %s",
+            self.config.symbol,
+            self.config.start_year,
+            self.config.end_year,
+            (log_level or "ENV/DEFAULT").upper(),
+        )
         # Validate inputs once here
         OHLCVIngestor.validate_symbol(self.config.symbol)
 
@@ -283,12 +291,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--s3-bucket", type=str, default=S3_BUCKET, help="S3 bucket name")
     parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
     parser.add_argument("--news-only", action="store_true", help="Only ingest news + relevance.")
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        help="Logging level (e.g. DEBUG, INFO). Defaults to LOG_LEVEL env or INFO.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    setup_logging()
     args = parse_args(argv)
+    setup_logging(args.log_level)
 
     symbol = args.symbol.strip().upper()
     start_year = OHLCVIngestor.validate_year_arg(args.start)
@@ -309,7 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         s3_bucket=args.s3_bucket,
     )
 
-    MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news)
+    MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news, log_level=args.log_level)
 
 
 if __name__ == "__main__":

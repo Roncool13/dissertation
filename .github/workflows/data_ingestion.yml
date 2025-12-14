@@ -36,6 +36,12 @@ on:
         default: true
         type: boolean
 
+      log_level:
+        description: "Logging level (e.g. INFO, DEBUG)"
+        required: false
+        default: "INFO"
+        type: string
+
 jobs:
   ingest:
     runs-on: ubuntu-latest
@@ -78,7 +84,8 @@ jobs:
             --start '${{ inputs.start }}' \
             --end '${{ inputs.end }}' \
             --local-output '${{ inputs.local_output }}' \
-            --s3-bucket '$S3_BUCKET'"
+            --s3-bucket '$S3_BUCKET' \
+            --log-level '${{ inputs.log_level }}'"
 
           # Your script supports:
           #   --ohlcv-only  => disables news
