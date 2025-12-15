@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import pandas as pd
+from pandas.tseries.offsets import BDay
 
 # Add parent directory to path for local imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -41,6 +42,20 @@ class IngestConfig:
     ohlcv_prefix: str = OHLCV_S3_PREFIX
     news_clean_prefix: str = NEWS_CLEAN_S3_PREFIX
     news_rel_prefix: str = NEWS_REL_S3_PREFIX
+
+
+def _year_end_date(year: int) -> dt.date:
+    """
+    Use T-2 business days for the current year, otherwise December 31st.
+    """
+    today = pd.Timestamp.today().normalize()
+    if year == today.year:
+        end_date = (today - BDay(2)).date()
+        logging.getLogger(__name__).debug("Computed rolling end date (T-2 BDays) for current year %s: %s", year, end_date)
+        return end_date
+    end_date = dt.date(year, 12, 31)
+    logging.getLogger(__name__).debug("Computed year-end date for %s: %s", year, end_date)
+    return dt.date(year, 12, 31)
 
 
 class S3Client:
@@ -106,7 +121,10 @@ class OHLCVIngestor:
 
     def ingest_year(self, year: int, key: str) -> None:
         start = dt.date(year, 1, 1)
-        end = dt.date(year, 12, 31)
+        end = _year_end_date(year)
+        if end < start:
+            self.logger.warning("Computed end date %s is before start %s; adjusting to start", end, start)
+            end = start
 
         self.logger.info("Downloading OHLCV for %s from %s to %s...", self.config.symbol, start, end)
         df = download_ohlcv_nsepy(self.config.symbol, start, end)
@@ -194,7 +212,10 @@ class NewsIngestor:
 
     def ingest_year(self, year: int, clean_key: str, rel_key: str) -> None:
         start = dt.date(year, 1, 1)
-        end = dt.date(year, 12, 31)
+        end = _year_end_date(year)
+        if end < start:
+            self.logger.warning("Computed end date %s is before start %s; adjusting to start", end, start)
+            end = start
 
         self.logger.info("Fetching NEWS for %s from %s to %s...", self.config.symbol, start, end)
         raw = fetch_news_from_provider(self.config.symbol, start, end)
