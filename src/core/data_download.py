@@ -4,6 +4,7 @@
 import time
 import datetime as dt
 import logging
+import json
 from typing import List
 from urllib.parse import quote_plus
 
@@ -12,6 +13,7 @@ import feedparser
 import pandas as pd
 from jugaad_data.nse import stock_df
 import jugaad_data.util as jugaad_util
+from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
 
 # Local imports
 from src.constants import SYMBOL_TO_COMPANY  # adjust import path as per your repo
@@ -53,7 +55,20 @@ def download_ohlcv_nsepy(
     """
     logger.info("Downloading OHLCV via jugaad-data for %s from %s to %s", symbol, start_date, end_date)
     _patch_jugaad_cache_makedirs()
-    df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date)
+    try:
+        df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date)
+    except (json.JSONDecodeError, RequestsJSONDecodeError) as exc:
+        logger.error(
+            "NSE endpoint returned non-JSON for %s %s->%s; possible site change or temporary block. Error: %s",
+            symbol,
+            start_date,
+            end_date,
+            exc,
+        )
+        raise RuntimeError(
+            f"NSE response could not be parsed as JSON for {symbol} ({start_date} -> {end_date}); "
+            "retry later or check connectivity/cookies."
+        ) from exc
 
     if df.empty:
         logger.error("No OHLCV data returned for %s in window %s -> %s", symbol, start_date, end_date)
