@@ -11,12 +11,13 @@ from urllib.parse import quote_plus
 # Third-party imports
 import feedparser
 import pandas as pd
+import yfinance as yf
 from jugaad_data.nse import stock_df
 import jugaad_data.util as jugaad_util
 from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
 
 # Local imports
-from src.constants import SYMBOL_TO_COMPANY  # adjust import path as per your repo
+from src.constants import SYMBOL_TO_COMPANY
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,7 @@ def _patch_jugaad_cache_makedirs() -> None:
     jugaad_util._makedirs_patched = True
 
 
-def download_ohlcv_nsepy(
-    symbol: str,
-    start_date: dt.date,
-    end_date: dt.date,
-) -> pd.DataFrame:
+def _download_ohlcv_jugaad(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     """
     Download daily OHLCV data from NSE using jugaad-data (stock_df)
     and return a DataFrame with columns:
@@ -55,26 +52,13 @@ def download_ohlcv_nsepy(
     """
     logger.info("Downloading OHLCV via jugaad-data for %s from %s to %s", symbol, start_date, end_date)
     _patch_jugaad_cache_makedirs()
-    try:
-        df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date)
-    except (json.JSONDecodeError, RequestsJSONDecodeError) as exc:
-        logger.error(
-            "NSE endpoint returned non-JSON for %s %s->%s; possible site change or temporary block. Error: %s",
-            symbol,
-            start_date,
-            end_date,
-            exc,
-        )
-        raise RuntimeError(
-            f"NSE response could not be parsed as JSON for {symbol} ({start_date} -> {end_date}); "
-            "retry later or check connectivity/cookies."
-        ) from exc
+    df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date)
 
     if df.empty:
-        logger.error("No OHLCV data returned for %s in window %s -> %s", symbol, start_date, end_date)
+        logger.error("[jugaad] No OHLCV data returned for %s in window %s -> %s", symbol, start_date, end_date)
         raise ValueError(f"No OHLCV data downloaded for symbol {symbol!r}.")
 
-    logger.debug("Raw OHLCV data shape for %s: %s", symbol, df.shape)
+    logger.debug("[jugaad] Raw OHLCV data shape for %s: %s", symbol, df.shape)
     df = df.reset_index().rename(
         columns={
             "DATE": "date",
@@ -86,8 +70,100 @@ def download_ohlcv_nsepy(
         }
     )
     df["symbol"] = symbol
-    logger.info("Completed OHLCV download for %s with %s rows", symbol, len(df))
-    return df
+    logger.info("[jugaad] Completed OHLCV download for %s with %s rows", symbol, len(df))
+    return df[["date", "open", "high", "low", "close", "volume", "symbol"]]
+
+
+def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+    """
+    Fallback provider: yfinance (Yahoo).
+    Uses NSE tickers: SYMBOL.NS
+    """
+    ticker = f"{symbol}.NS"
+    logger.warning("[yfinance] Fallback OHLCV for %s using ticker %s", symbol, ticker)
+
+    # yfinance end can behave like exclusive; add +1 day and filter back
+    end_plus = end_date + dt.timedelta(days=1)
+
+    data = yf.download(
+        tickers=ticker,
+        start=start_date.isoformat(),
+        end=end_plus.isoformat(),
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+    )
+
+    if data is None or len(data) == 0:
+        raise ValueError(f"[yfinance] No OHLCV data returned for {symbol!r} ({ticker}).")
+
+    # Handle MultiIndex columns if present
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = [c[0] for c in data.columns]
+
+    data = data.reset_index().rename(
+        columns={
+            "Date": "date",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
+
+    df = data[["date", "open", "high", "low", "close", "volume"]].copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)]
+    df["symbol"] = symbol
+    logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
+
+    return df[["date", "open", "high", "low", "close", "volume", "symbol"]]
+
+
+def download_ohlcv_nsepy(
+    symbol: str,
+    start_date: dt.date,
+    end_date: dt.date,
+) -> pd.DataFrame:
+    """
+    Download daily OHLCV data from NSE using jugaad-data.
+    If NSE blocks / returns non-JSON (common), fallback to yfinance.
+
+    Returns DataFrame with columns:
+        date, open, high, low, close, volume, symbol
+    """
+    symbol = symbol.strip().upper()
+
+    try:
+        df = _download_ohlcv_jugaad(symbol, start_date, end_date)
+        logger.info("[jugaad] Completed OHLCV download for %s with %s rows", symbol, len(df))
+        return df
+
+    except (json.JSONDecodeError, RequestsJSONDecodeError) as exc:
+        logger.warning(
+            "[jugaad] NSE returned non-JSON for %s %s->%s; falling back to yfinance. Error: %s",
+            symbol,
+            start_date,
+            end_date,
+            exc,
+        )
+        df = _download_ohlcv_yfinance(symbol, start_date, end_date)
+        logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
+        return df
+
+    except Exception as exc:
+        logger.warning(
+            "[jugaad] Failed for %s %s->%s (%s). Falling back to yfinance.",
+            symbol,
+            start_date,
+            end_date,
+            f"{type(exc).__name__}: {exc}",
+        )
+        df = _download_ohlcv_yfinance(symbol, start_date, end_date)
+        logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
+        return df
 
 
 def _build_google_news_queries(symbol: str) -> List[str]:
@@ -113,6 +189,7 @@ def _build_google_news_queries(symbol: str) -> List[str]:
         if q not in seen:
             out.append(q)
             seen.add(q)
+
     logger.debug("Built %s Google News queries for %s: %s", len(out), symbol, out)
     return out
 
