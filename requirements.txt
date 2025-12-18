@@ -7,3 +7,4 @@ pyarrow
 sentence-transformers>=2.2.2
 torch
 tqdm
+yfinance
