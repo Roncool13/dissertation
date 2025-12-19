@@ -1,6 +1,7 @@
 boto3
 jugaad-data
 feedparser
+requests
 numpy
 pandas
 pyarrow
