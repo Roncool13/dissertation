@@ -2,17 +2,21 @@
 
 # Standard library imports
 import time
-import datetime as dt
-import logging
-import json
 import random
+import zipfile
+import logging
+import datetime as dt
 from typing import List
 from urllib.parse import quote_plus
 
 # Third-party imports
 import feedparser
 import pandas as pd
+import requests
+
+# Optional last-resort fallback
 import yfinance as yf
+
 from jugaad_data.nse import stock_df
 import jugaad_data.util as jugaad_util
 from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
@@ -22,10 +26,24 @@ from src.constants import SYMBOL_TO_COMPANY
 
 logger = logging.getLogger(__name__)
 
+# -------------------------
+# Helpers
+# -------------------------
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Connection": "keep-alive",
+}
 
-# -------------------------
-# OHLCV: NSE (jugaad) + fallback
-# -------------------------
+
+def _daterange(start: dt.date, end: dt.date):
+    cur = start
+    while cur <= end:
+        yield cur
+        cur += dt.timedelta(days=1)
+
+
 def _patch_jugaad_cache_makedirs() -> None:
     """
     jugaad-data creates its cache directory in multiple threads without
@@ -48,19 +66,127 @@ def _patch_jugaad_cache_makedirs() -> None:
     jugaad_util._makedirs_patched = True
 
 
+# -------------------------
+# Provider 1 (Recommended for GitHub Actions): NSE Bhavcopy
+# -------------------------
+def _bhavcopy_urls(d: dt.date) -> List[str]:
+    """
+    Try a couple of known NSE archive patterns.
+    NSE has changed these over time; we try multiple.
+    """
+    logger.debug("[bhavcopy] Building archive URLs for %s", d)
+    dd = d.strftime("%d")
+    mmm = d.strftime("%b").upper()          # e.g. DEC
+    yyyy = d.strftime("%Y")
+    ddmmmyyyy = d.strftime("%d%b%Y").upper()  # e.g. 19DEC2025
+
+    # Common patterns historically used by NSE archives
+    return [
+        f"https://archives.nseindia.com/content/historical/EQUITIES/{yyyy}/{mmm}/cm{ddmmmyyyy}bhav.csv.zip",
+        f"https://www1.nseindia.com/content/historical/EQUITIES/{yyyy}/{mmm}/cm{ddmmmyyyy}bhav.csv.zip",
+    ]
+
+
+def _download_bhavcopy_zip_for_day(session: requests.Session, d: dt.date) -> pd.DataFrame:
+    last_err = None
+    for url in _bhavcopy_urls(d):
+        try:
+            logger.debug("[bhavcopy] Requesting %s", url)
+            r = session.get(url, headers=DEFAULT_HEADERS, timeout=60)
+            if r.status_code == 200 and r.content:
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+                # usually single CSV inside
+                csv_name = z.namelist()[0]
+                with z.open(csv_name) as fp:
+                    df = pd.read_csv(fp)
+                return df
+            else:
+                last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = repr(e)
+            continue
+    raise RuntimeError(f"Bhavcopy not available for {d} (last_err={last_err})")
+
+
+def _download_ohlcv_bhavcopy(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+    """
+    Build OHLCV for a symbol by reading daily bhavcopy files.
+    This is slower than a single API call, but *reliable on GitHub Actions*.
+    """
+    logger.info("[bhavcopy] Downloading OHLCV for %s from %s to %s", symbol, start_date, end_date)
+    symbol = symbol.upper()
+
+    session = requests.Session()
+
+    rows = []
+    failures = 0
+
+    for d in _daterange(start_date, end_date):
+        # NSE closed on weekends; skip to reduce downloads
+        if d.weekday() >= 5:
+            logger.debug("[bhavcopy] Skipping weekend %s", d)
+            continue
+
+        try:
+            day_df = _download_bhavcopy_zip_for_day(session, d)
+
+            # Column names in bhavcopy typically:
+            # SYMBOL, SERIES, OPEN, HIGH, LOW, CLOSE, TOTTRDQTY, TIMESTAMP, ...
+            # We only need EQ series.
+            if "SYMBOL" not in day_df.columns:
+                continue
+
+            day_df = day_df[day_df["SYMBOL"].astype(str).str.upper() == symbol]
+            if "SERIES" in day_df.columns:
+                day_df = day_df[day_df["SERIES"].astype(str).str.upper() == "EQ"]
+
+            if day_df.empty:
+                continue
+
+            r0 = day_df.iloc[0]
+
+            rows.append(
+                {
+                    "date": pd.to_datetime(d),
+                    "open": float(r0["OPEN"]),
+                    "high": float(r0["HIGH"]),
+                    "low": float(r0["LOW"]),
+                    "close": float(r0["CLOSE"]),
+                    "volume": float(r0["TOTTRDQTY"]),
+                    "symbol": symbol,
+                }
+            )
+
+            # Gentle pacing to be polite
+                time.sleep(0.15 + random.uniform(0, 0.15))
+
+        except Exception as e:
+            failures += 1
+            # don’t fail entire year on a couple missing holidays / transient errors
+            logger.debug("[bhavcopy] Failed for %s: %s", d, e)
+            time.sleep(0.3)
+
+    if not rows:
+        raise ValueError(f"[bhavcopy] No OHLCV rows built for {symbol} in {start_date}->{end_date}")
+
+    df = pd.DataFrame(rows)
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    logger.info("[bhavcopy] Completed %s rows (failures=%d)", len(df), failures)
+    return df
+
+
+# -------------------------
+# Provider 2: jugaad (kept as secondary)
+# -------------------------
 def _download_ohlcv_jugaad(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
-    """
-    Download daily OHLCV data from NSE using jugaad-data (stock_df)
-    and return a DataFrame with columns:
-        date, open, high, low, close, volume, symbol
-    """
-    logger.info("Downloading OHLCV via jugaad-data for %s from %s to %s", symbol, start_date, end_date)
+    logger.info("[jugaad] Downloading OHLCV for %s from %s to %s", symbol, start_date, end_date)
     _patch_jugaad_cache_makedirs()
     df = stock_df(symbol=symbol, from_date=start_date, to_date=end_date)
 
     if df.empty:
-        logger.error("[jugaad] No OHLCV data returned for %s in window %s -> %s", symbol, start_date, end_date)
-        raise ValueError(f"No OHLCV data downloaded for symbol {symbol!r}.")
+        raise ValueError(f"[jugaad] No OHLCV data downloaded for symbol {symbol!r}.")
 
     logger.debug("[jugaad] Raw OHLCV data shape for %s: %s", symbol, df.shape)
     df = df.reset_index().rename(
@@ -78,53 +204,25 @@ def _download_ohlcv_jugaad(symbol: str, start_date: dt.date, end_date: dt.date) 
     return df[["date", "open", "high", "low", "close", "volume", "symbol"]]
 
 
-def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
-    """
-    Fallback provider: yfinance (Yahoo).
-    Uses NSE tickers: SYMBOL.NS
-    """
-    ticker = f"{symbol}.NS"
-    logger.warning("[yfinance] Fallback OHLCV for %s using ticker %s", symbol, ticker)
-
-    # yfinance end can behave like exclusive; add +1 day and filter back
-    end_plus = end_date + dt.timedelta(days=1)
-
-    data = yf.download(
-        tickers=ticker,
-        start=start_date.isoformat(),
-        end=end_plus.isoformat(),
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
-
+# -------------------------
+# Provider 3: yfinance (last resort; often 429 on GH Actions)
+# -------------------------
+def _normalize_yf_frame(data: pd.DataFrame, symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     if data is None or len(data) == 0:
-        raise ValueError(f"[yfinance] No OHLCV data returned for {symbol!r} ({ticker}).")
+        return pd.DataFrame()
 
-    # Handle MultiIndex columns if present
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = [c[0] for c in data.columns]
 
     data = data.reset_index()
 
-    # Standardize column names
     data.rename(
-        columns={
-            "Date": "date",
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
-        },
+        columns={"Date": "date", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"},
         inplace=True,
     )
 
     needed = ["date", "open", "high", "low", "close", "volume"]
-    missing = [c for c in needed if c not in data.columns]
-    if missing:
-        logger.debug("[yfinance] Missing expected columns %s; columns=%s", missing, list(data.columns))
+    if any(c not in data.columns for c in needed):
         return pd.DataFrame()
 
     df = data[needed].copy()
@@ -132,45 +230,26 @@ def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date
     df = df[df["date"].notna()]
     df = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)]
     df["symbol"] = symbol
-    logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
-
     return df[["date", "open", "high", "low", "close", "volume", "symbol"]]
 
 
 def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
-    """
-    Fallback provider: Yahoo Finance via yfinance.
-
-    GitHub runners often get 429 rate-limited by Yahoo.
-    We implement retries + prefer Ticker().history() which is often more reliable
-    than yf.download() under throttling.
-    """
     ticker = f"{symbol}.NS"
     logger.warning("[yfinance] Fallback OHLCV for %s using ticker %s", symbol, ticker)
 
-    # yfinance end can behave like exclusive; add +1 day and filter back
     end_plus = end_date + dt.timedelta(days=1)
-
     max_attempts = 6
     base_sleep = 2.0
-
     last_err = None
+
     for attempt in range(1, max_attempts + 1):
         try:
-            # 1) Try history() first
             t = yf.Ticker(ticker)
-            hist = t.history(
-                start=start_date.isoformat(),
-                end=end_plus.isoformat(),
-                interval="1d",
-                auto_adjust=False,
-            )
+            hist = t.history(start=start_date.isoformat(), end=end_plus.isoformat(), interval="1d", auto_adjust=False)
             df = _normalize_yf_frame(hist, symbol, start_date, end_date)
             if not df.empty:
-                logger.info("[yfinance] history() succeeded for %s with %d rows", ticker, len(df))
                 return df
 
-            # 2) Fallback to yf.download()
             data = yf.download(
                 tickers=ticker,
                 start=start_date.isoformat(),
@@ -182,78 +261,57 @@ def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date
             )
             df = _normalize_yf_frame(data, symbol, start_date, end_date)
             if not df.empty:
-                logger.info("[yfinance] download() succeeded for %s with %d rows", ticker, len(df))
                 return df
 
-            # If both returned empty, treat as retryable (could be throttled / transient)
-            last_err = ValueError("Empty response from yfinance (possible 429 throttling)")
+            last_err = ValueError("Empty response (likely throttled)")
             raise last_err
 
         except Exception as e:
             last_err = e
-            # Exponential backoff + jitter (helps with 429)
             sleep_s = min(60.0, base_sleep * (2 ** (attempt - 1))) + random.uniform(0, 1.5)
-            logger.warning(
-                "[yfinance] Attempt %d/%d failed for %s: %s. Sleeping %.1fs",
-                attempt,
-                max_attempts,
-                ticker,
-                f"{type(e).__name__}: {e}",
-                sleep_s,
-            )
+            logger.warning("[yfinance] Attempt %d/%d failed for %s: %s. Sleeping %.1fs",
+                           attempt, max_attempts, ticker, f"{type(e).__name__}: {e}", sleep_s)
             time.sleep(sleep_s)
 
     raise ValueError(f"[yfinance] No OHLCV data returned for {symbol!r} ({ticker}). Last error: {last_err}")
 
 
+# -------------------------
+# Public function used by pipeline
+# -------------------------
 def download_ohlcv_nsepy(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     """
-    Primary: NSE via jugaad-data.
-    Fallback: Yahoo Finance via yfinance (with retries for 429).
+    Order of attempts (best for GitHub Actions reliability):
+      1) NSE Bhavcopy (archives)
+      2) jugaad-data (NSE API)
+      3) yfinance (last resort; may 429 on GH runners)
     """
+    logger.info("Request received to download OHLCV for %s (%s -> %s)", symbol, start_date, end_date)
     symbol = symbol.strip().upper()
 
+    # 1) bhavcopy
     try:
-        df = _download_ohlcv_jugaad(symbol, start_date, end_date)
-        logger.info("[jugaad] Completed OHLCV download for %s with %s rows", symbol, len(df))
-        return df
+        return _download_ohlcv_bhavcopy(symbol, start_date, end_date)
+    except Exception as e:
+        logger.warning("[bhavcopy] Failed: %s. Trying jugaad...", e)
 
+    # 2) jugaad
+    try:
+        return _download_ohlcv_jugaad(symbol, start_date, end_date)
     except (json.JSONDecodeError, RequestsJSONDecodeError) as exc:
-        logger.warning(
-            "[jugaad] NSE returned non-JSON for %s %s->%s; falling back to yfinance. Error: %s",
-            symbol,
-            start_date,
-            end_date,
-            exc,
-        )
-        df = _download_ohlcv_yfinance(symbol, start_date, end_date)
-        logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
-        return df
-
+        logger.warning("[jugaad] NSE returned non-JSON; trying yfinance. Error: %s", exc)
     except Exception as exc:
-        logger.warning(
-            "[jugaad] Failed for %s %s->%s (%s). Falling back to yfinance.",
-            symbol,
-            start_date,
-            end_date,
-            f"{type(exc).__name__}: {exc}",
-        )
-        df = _download_ohlcv_yfinance(symbol, start_date, end_date)
-        logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
-        return df
+        logger.warning("[jugaad] Failed; trying yfinance. Error: %s", exc)
+
+    # 3) yfinance
+    return _download_ohlcv_yfinance(symbol, start_date, end_date)
 
 
 # -------------------------
-# News: Google News RSS
+# News: Google News RSS (unchanged)
 # -------------------------
 def _build_google_news_queries(symbol: str) -> List[str]:
-    """
-    Build multiple queries to improve relevance and coverage.
-    Google News RSS is query-sensitive, so we try a few.
-    """
     company = SYMBOL_TO_COMPANY.get(symbol, symbol)
-
-    # Finance-context anchors reduce irrelevant hits
     queries = [
         f'"{company}" stock',
         f'"{company}" shares',
@@ -261,22 +319,15 @@ def _build_google_news_queries(symbol: str) -> List[str]:
         f"{company} NSE",
         f"{symbol} stock",
     ]
-
-    # Remove duplicates while preserving order
-    seen = set()
-    out = []
+    seen, out = set(), []
     for q in queries:
         if q not in seen:
             out.append(q)
             seen.add(q)
-
-    logger.debug("Built %s Google News queries for %s: %s", len(out), symbol, out)
     return out
 
 
 def _google_news_rss_url(query: str) -> str:
-    # hl=en-IN, gl=IN, ceid=IN:en to bias towards India + English
-    # Sorting is handled internally by Google News.
     q = quote_plus(query)
     return f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
 
@@ -288,100 +339,48 @@ def fetch_news_from_provider(
     max_items_per_query: int = 50,
     sleep_s: float = 0.6,
 ) -> pd.DataFrame:
-    """
-    Fetch news using Google News RSS.
-
-    Returns a DataFrame with:
-      - headline
-      - source
-      - published_at
-      - link
-      - summary
-      - query_used
-
-    Notes:
-    - RSS provides limited history; for long backfills you may need repeated runs / pagination isn't supported.
-    - This function is best for daily/weekly ingestion and near-history.
-    """
+    logger.info("[news] Fetching news for %s between %s and %s", symbol, start_date, end_date)
     symbol = symbol.strip().upper()
-
     queries = _build_google_news_queries(symbol)
+    logger.debug("[news] Built %d queries for %s: %s", len(queries), symbol, queries)
 
     rows = []
     for q in queries:
         url = _google_news_rss_url(q)
-        logger.info("Fetching RSS for %s using query %r", symbol, q)
+        logger.debug("[news] Fetching RSS for query %r", q)
         feed = feedparser.parse(url)
         entries = getattr(feed, "entries", []) or []
-        logger.debug("Received %s entries for query %r", len(entries), q)
-
+        logger.debug("[news] Retrieved %d entries for query %r", len(entries), q)
         for e in entries[:max_items_per_query]:
-            title = getattr(e, "title", None)
-            link = getattr(e, "link", None)
-
-            # feedparser: published or updated may exist depending on feed
-            published = getattr(e, "published", None) or getattr(e, "updated", None)
-
-            # source handling: sometimes e.source.title exists
-            source = None
-            if hasattr(e, "source") and isinstance(e.source, dict):
-                source = e.source.get("title")
-            elif hasattr(e, "source") and hasattr(e.source, "title"):
-                source = e.source.title
-
-            summary = getattr(e, "summary", None)
-
             rows.append(
                 {
-                    "headline": title,
-                    "source": source,
-                    "published_at": published,
-                    "link": link,
-                    "summary": summary,
+                    "headline": getattr(e, "title", None),
+                    "source": getattr(getattr(e, "source", None), "title", None) if hasattr(e, "source") else None,
+                    "published_at": getattr(e, "published", None) or getattr(e, "updated", None),
+                    "link": getattr(e, "link", None),
+                    "summary": getattr(e, "summary", None),
                     "query_used": q,
                 }
             )
-
-        # polite pacing
-        logger.debug("Sleeping %.2fs between RSS requests", sleep_s)
         time.sleep(sleep_s)
 
     if not rows:
-        logger.warning("No news rows collected for %s between %s and %s", symbol, start_date, end_date)
+        logger.info("[news] No news rows collected for %s in given range", symbol)
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    logger.debug("Constructed news DataFrame with %s rows before cleanup", len(df))
-
-    # Basic cleanup / normalization
-    before_headline = len(df)
     df.dropna(subset=["headline"], inplace=True)
-    logger.debug("Dropped %s rows missing headline", before_headline - len(df))
-
-    # Parse datetime (RSS dates are usually RFC822)
     df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce", utc=True)
 
-    # Filter by requested date range (best-effort)
     df["date"] = df["published_at"].dt.date
-    before_range = len(df)
     df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
-    logger.debug("Filtered %s rows outside requested date range", before_range - len(df))
 
-    # Deduplicate (prefer link, fallback to headline)
-    if "link" in df.columns and df["link"].notna().any():
-        before_dupes = len(df)
+    if df["link"].notna().any():
         df.drop_duplicates(subset=["link"], inplace=True)
-        logger.debug("Removed %s duplicate rows by link", before_dupes - len(df))
     else:
-        before_dupes = len(df)
         df.drop_duplicates(subset=["headline"], inplace=True)
-        logger.debug("Removed %s duplicate rows by headline", before_dupes - len(df))
 
-    # Drop helper
     df.drop(columns=["date"], inplace=True, errors="ignore")
-
-    # Sort stable
     df.sort_values(["published_at", "source"], inplace=True, na_position="last")
     df.reset_index(drop=True, inplace=True)
-    logger.info("Completed news fetch for %s with %s rows", symbol, len(df))
     return df
