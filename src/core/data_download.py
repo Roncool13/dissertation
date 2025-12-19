@@ -5,6 +5,7 @@ import time
 import datetime as dt
 import logging
 import json
+import random
 from typing import List
 from urllib.parse import quote_plus
 
@@ -22,6 +23,9 @@ from src.constants import SYMBOL_TO_COMPANY
 logger = logging.getLogger(__name__)
 
 
+# -------------------------
+# OHLCV: NSE (jugaad) + fallback
+# -------------------------
 def _patch_jugaad_cache_makedirs() -> None:
     """
     jugaad-data creates its cache directory in multiple threads without
@@ -102,7 +106,10 @@ def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = [c[0] for c in data.columns]
 
-    data = data.reset_index().rename(
+    data = data.reset_index()
+
+    # Standardize column names
+    data.rename(
         columns={
             "Date": "date",
             "Open": "open",
@@ -110,11 +117,19 @@ def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date
             "Low": "low",
             "Close": "close",
             "Volume": "volume",
-        }
+        },
+        inplace=True,
     )
 
-    df = data[["date", "open", "high", "low", "close", "volume"]].copy()
+    needed = ["date", "open", "high", "low", "close", "volume"]
+    missing = [c for c in needed if c not in data.columns]
+    if missing:
+        logger.debug("[yfinance] Missing expected columns %s; columns=%s", missing, list(data.columns))
+        return pd.DataFrame()
+
+    df = data[needed].copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[df["date"].notna()]
     df = df[(df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)]
     df["symbol"] = symbol
     logger.info("[yfinance] Completed OHLCV download for %s with %s rows", symbol, len(df))
@@ -122,17 +137,79 @@ def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date
     return df[["date", "open", "high", "low", "close", "volume", "symbol"]]
 
 
-def download_ohlcv_nsepy(
-    symbol: str,
-    start_date: dt.date,
-    end_date: dt.date,
-) -> pd.DataFrame:
+def _download_ohlcv_yfinance(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     """
-    Download daily OHLCV data from NSE using jugaad-data.
-    If NSE blocks / returns non-JSON (common), fallback to yfinance.
+    Fallback provider: Yahoo Finance via yfinance.
 
-    Returns DataFrame with columns:
-        date, open, high, low, close, volume, symbol
+    GitHub runners often get 429 rate-limited by Yahoo.
+    We implement retries + prefer Ticker().history() which is often more reliable
+    than yf.download() under throttling.
+    """
+    ticker = f"{symbol}.NS"
+    logger.warning("[yfinance] Fallback OHLCV for %s using ticker %s", symbol, ticker)
+
+    # yfinance end can behave like exclusive; add +1 day and filter back
+    end_plus = end_date + dt.timedelta(days=1)
+
+    max_attempts = 6
+    base_sleep = 2.0
+
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # 1) Try history() first
+            t = yf.Ticker(ticker)
+            hist = t.history(
+                start=start_date.isoformat(),
+                end=end_plus.isoformat(),
+                interval="1d",
+                auto_adjust=False,
+            )
+            df = _normalize_yf_frame(hist, symbol, start_date, end_date)
+            if not df.empty:
+                logger.info("[yfinance] history() succeeded for %s with %d rows", ticker, len(df))
+                return df
+
+            # 2) Fallback to yf.download()
+            data = yf.download(
+                tickers=ticker,
+                start=start_date.isoformat(),
+                end=end_plus.isoformat(),
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            df = _normalize_yf_frame(data, symbol, start_date, end_date)
+            if not df.empty:
+                logger.info("[yfinance] download() succeeded for %s with %d rows", ticker, len(df))
+                return df
+
+            # If both returned empty, treat as retryable (could be throttled / transient)
+            last_err = ValueError("Empty response from yfinance (possible 429 throttling)")
+            raise last_err
+
+        except Exception as e:
+            last_err = e
+            # Exponential backoff + jitter (helps with 429)
+            sleep_s = min(60.0, base_sleep * (2 ** (attempt - 1))) + random.uniform(0, 1.5)
+            logger.warning(
+                "[yfinance] Attempt %d/%d failed for %s: %s. Sleeping %.1fs",
+                attempt,
+                max_attempts,
+                ticker,
+                f"{type(e).__name__}: {e}",
+                sleep_s,
+            )
+            time.sleep(sleep_s)
+
+    raise ValueError(f"[yfinance] No OHLCV data returned for {symbol!r} ({ticker}). Last error: {last_err}")
+
+
+def download_ohlcv_nsepy(symbol: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+    """
+    Primary: NSE via jugaad-data.
+    Fallback: Yahoo Finance via yfinance (with retries for 429).
     """
     symbol = symbol.strip().upper()
 
@@ -166,6 +243,9 @@ def download_ohlcv_nsepy(
         return df
 
 
+# -------------------------
+# News: Google News RSS
+# -------------------------
 def _build_google_news_queries(symbol: str) -> List[str]:
     """
     Build multiple queries to improve relevance and coverage.
@@ -178,8 +258,8 @@ def _build_google_news_queries(symbol: str) -> List[str]:
         f'"{company}" stock',
         f'"{company}" shares',
         f'"{company}" results',
-        f'{company} NSE',          # sometimes helps for India context
-        f'{symbol} stock',         # fallback
+        f"{company} NSE",
+        f"{symbol} stock",
     ]
 
     # Remove duplicates while preserving order
@@ -304,5 +384,4 @@ def fetch_news_from_provider(
     df.sort_values(["published_at", "source"], inplace=True, na_position="last")
     df.reset_index(drop=True, inplace=True)
     logger.info("Completed news fetch for %s with %s rows", symbol, len(df))
-
     return df
