@@ -50,8 +50,8 @@ def _year_end_date(year: int) -> dt.date:
     """
     today = pd.Timestamp.today().normalize()
     if year == today.year:
-        end_date = (today - BDay(2)).date()
-        logging.getLogger(__name__).debug("Computed rolling end date (T-2 BDays) for current year %s: %s", year, end_date)
+        end_date = (today - BDay(10)).date()
+        logging.getLogger(__name__).debug("Computed rolling end date (T-10 BDays) for current year %s: %s", year, end_date)
         return end_date
     end_date = dt.date(year, 12, 31)
     logging.getLogger(__name__).debug("Computed year-end date for %s: %s", year, end_date)
