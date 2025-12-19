@@ -1,6 +1,8 @@
 # src/core/data_download.py
 
 # Standard library imports
+import io
+import json
 import time
 import random
 import zipfile
@@ -158,7 +160,7 @@ def _download_ohlcv_bhavcopy(symbol: str, start_date: dt.date, end_date: dt.date
             )
 
             # Gentle pacing to be polite
-                time.sleep(0.15 + random.uniform(0, 0.15))
+            time.sleep(0.15 + random.uniform(0, 0.15))
 
         except Exception as e:
             failures += 1
