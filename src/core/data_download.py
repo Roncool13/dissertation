@@ -401,8 +401,10 @@ class DesiquantCandlesMirror:
         self.default_segment = constants.DEFAULT_CANDLES_SEGMENT
         self.desiquant_bucket = constants.DESIQUANT_CANDLES_BUCKET
         self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+        logger.info("[RAW] Initialized Candles mirror for bucket=%s, prefix=%s", self.raw_bucket, self.raw_prefix)
 
     def _desiquant_storage_options(self):
+        logger.debug("[RAW] Building storage options for Desiquant endpoint %s", self.constants.DESIQUANT_ENDPOINT_URL)
         return {
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
@@ -418,6 +420,7 @@ class DesiquantCandlesMirror:
 
     def build_raw_candles_s3_uri(self, symbol: str, segment: str | None = None) -> str:
         key = self.build_raw_candles_key(symbol, segment)
+        logger.debug("[RAW] Computed raw candles key=%s", key)
         return f"s3://{self.raw_bucket}/{key}"
 
     def read_desiquant_candles_df(self, symbol: str, segment: str | None = None) -> pd.DataFrame:
@@ -467,7 +470,7 @@ class DesiquantCandlesMirror:
 
         logger.info("[RAW] Writing to: %s", raw_uri)
         self._write_parquet_to_raw(df, raw_key)
-        return raw_uri
+        logger.info("[RAW] Completed mirroring for %s", symbol)
 
 
 class DesiquantNewsMirror:
@@ -479,8 +482,10 @@ class DesiquantNewsMirror:
         self.raw_prefix = constants.RAW_DESIQUANT_NEWS_PREFIX
         self.desiquant_bucket = constants.DESIQUANT_NEWS_BUCKET
         self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+        logger.info("[RAW] Initialized News mirror for bucket=%s, prefix=%s", self.raw_bucket, self.raw_prefix)
 
     def _desiquant_storage_options(self):
+        logger.debug("[RAW] Building storage options for Desiquant news endpoint %s", self.constants.DESIQUANT_ENDPOINT_URL)
         return {
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
@@ -495,6 +500,7 @@ class DesiquantNewsMirror:
 
     def build_raw_news_s3_uri(self, symbol: str) -> str:
         key = self.build_raw_news_key(symbol)
+        logger.debug("[RAW] Computed raw news key=%s", key)
         return f"s3://{self.raw_bucket}/{key}"
 
     def read_desiquant_news_df(self, symbol: str) -> pd.DataFrame:
@@ -543,7 +549,7 @@ class DesiquantNewsMirror:
 
         logger.info("[RAW] Writing to: %s", raw_uri)
         self._write_parquet_to_raw(df, raw_key)
-        return raw_uri
+        logger.info("[RAW] Completed mirroring for %s", symbol)
     
 
 class DesiquantFinancialResultsMirror:
@@ -555,8 +561,13 @@ class DesiquantFinancialResultsMirror:
         self.raw_prefix = constants.RAW_DESIQUANT_FINANCIALS_PREFIX
         self.desiquant_bucket = constants.DESIQUANT_FINANCIAL_RESULTS_BUCKET
         self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+        logger.info("[RAW] Initialized Financial Results mirror for bucket=%s, prefix=%s", self.raw_bucket, self.raw_prefix)
 
     def _desiquant_storage_options(self):
+        logger.debug(
+            "[RAW] Building storage options for Desiquant financial results endpoint %s",
+            self.constants.DESIQUANT_ENDPOINT_URL,
+        )
         return {
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
@@ -571,6 +582,7 @@ class DesiquantFinancialResultsMirror:
 
     def build_raw_results_s3_uri(self, symbol: str) -> str:
         key = self.build_raw_results_key(symbol)
+        logger.debug("[RAW] Computed raw financial results key=%s", key)
         return f"s3://{self.raw_bucket}/{key}"
 
     def read_desiquant_results_df(self, symbol: str) -> pd.DataFrame:
@@ -619,7 +631,7 @@ class DesiquantFinancialResultsMirror:
 
         logger.info("[RAW] Writing to: %s", raw_uri)
         self._write_parquet_to_raw(df, raw_key)
-        return raw_uri
+        logger.info("[RAW] Completed mirroring for %s", symbol)
 
 
 class DesiquantCorporateAnnouncementsMirror:
@@ -630,9 +642,20 @@ class DesiquantCorporateAnnouncementsMirror:
         self.raw_bucket = constants.S3_BUCKET
         self.raw_prefix = constants.RAW_DESIQUANT_ANNOUNCEMENTS_PREFIX
         self.desiquant_bucket = constants.DESIQUANT_CORP_ANNOUNCEMENTS_BUCKET
+        self.source_list = constants.SUPPORTED_ANNOUNCEMENTS_SOURCES
         self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+        logger.info(
+            "[RAW] Initialized Corporate Announcements mirror for bucket=%s, prefix=%s; sources=%s",
+            self.raw_bucket,
+            self.raw_prefix,
+            self.source_list,
+        )
 
     def _desiquant_storage_options(self):
+        logger.debug(
+            "[RAW] Building storage options for Desiquant corporate announcements endpoint %s",
+            self.constants.DESIQUANT_ENDPOINT_URL,
+        )
         return {
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
@@ -647,6 +670,7 @@ class DesiquantCorporateAnnouncementsMirror:
 
     def build_raw_announcements_s3_uri(self, symbol: str, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> str:
         key = self.build_raw_announcements_key(symbol, source)
+        logger.debug("[RAW] Computed raw corporate announcements key=%s", key)
         return f"s3://{self.raw_bucket}/{key}"
 
     def read_desiquant_announcements_df(self, symbol: str, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> pd.DataFrame:
@@ -680,19 +704,20 @@ class DesiquantCorporateAnnouncementsMirror:
         """
         Downloads corporate announcements for a symbol from Desiquant and stores it in your S3 raw zone.
         """
-        raw_key = self.build_raw_announcements_key(symbol, source)
-        raw_uri = self.build_raw_announcements_s3_uri(symbol, source)
+        for source in self.source_list:
+            raw_key = self.build_raw_announcements_key(symbol, source)
+            raw_uri = self.build_raw_announcements_s3_uri(symbol, source)
 
-        if (not overwrite) and self.raw_s3.object_exists(raw_key):
-            logger.info("[RAW] Exists, skipping: %s", raw_uri)
-            return raw_uri
+            if (not overwrite) and self.raw_s3.object_exists(raw_key):
+                logger.info("[RAW] Exists, skipping: %s", raw_uri)
+                return raw_uri
 
-        logger.info("[RAW] Fetching Desiquant corporate announcements for %s", symbol)
-        df = self.read_desiquant_announcements_df(symbol=symbol, source=source)
+            logger.info("[RAW] Fetching Desiquant corporate announcements for %s", symbol)
+            df = self.read_desiquant_announcements_df(symbol=symbol, source=source)
 
-        # Optional: light normalization (column lowercase)
-        df.columns = [c.strip().lower() for c in df.columns]
+            # Optional: light normalization (column lowercase)
+            df.columns = [c.strip().lower() for c in df.columns]
 
-        logger.info("[RAW] Writing to: %s", raw_uri)
-        self._write_parquet_to_raw(df, raw_key)
-        return raw_uri
+            logger.info("[RAW] Writing to: %s", raw_uri)
+            self._write_parquet_to_raw(df, raw_key)
+            logger.info("[RAW] Completed mirroring for %s, source=%s", symbol, source)
