@@ -8,14 +8,6 @@ NSE_SYMBOLS = [
 ]
 
 
-# Default S3 Bucket and Prefix for OHLCV Data Storage
-S3_BUCKET = "dissertation-databucket"
-OHLCV_S3_PREFIX = "ohlcv"
-NEWS_S3_PREFIX = "news"
-NEWS_CLEAN_S3_PREFIX = "news_clean"
-NEWS_REL_S3_PREFIX = "news_clean_relevance"
-
-
 # Mapping from NSE Symbols to Company Names
 SYMBOL_TO_COMPANY = {
     "TCS": "Tata Consultancy Services",
@@ -48,3 +40,50 @@ SYMBOL_TO_DESCRIPTION = {
     ),
     # extend as needed
 }
+
+# Raw-zone bhavcopy (daily EOD dump for all symbols)
+BHAVCOPY_RAW_S3_PREFIX = "bhavcopy/raw"
+BHAVCOPY_LOCAL_DIR = "data/raw/bhavcopy"
+
+
+# Default S3 Bucket and Prefix for OHLCV Data Storage
+S3_BUCKET = "dissertation-databucket"
+OHLCV_S3_PREFIX = "ohlcv"
+NEWS_S3_PREFIX = "news"
+NEWS_CLEAN_S3_PREFIX = "news_clean"
+NEWS_REL_S3_PREFIX = "news_clean_relevance"
+RAW_S3_PREFIX = "raw"
+PROCESSED_OHLCV_PREFIX = "ohlcv"  # you already effectively use this pattern
+
+RAW_DESIQUANT_PREFIX = f"{RAW_S3_PREFIX}/desiquant"
+RAW_DESIQUANT_OHLCV_PREFIX = f"{RAW_DESIQUANT_PREFIX}/candles"   # intraday parquet per symbol
+RAW_DESIQUANT_NEWS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/news"      # news parquet per symbol
+RAW_DESIQUANT_ANNOUNCEMENTS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/announcements"  # corp announcements per symbol
+RAW_DESIQUANT_FINANCIALS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/results"  # financial results per symbol
+
+# Desiquant dataset access (R2 endpoint via S3-compatible API)
+DESIQUANT_ENDPOINT_URL = "https://cbabd13f6c54798a9ec05df5b8070a6e.r2.cloudflarestorage.com"
+DESIQUANT_ACCESS_KEY = "5c8ea9c516abfc78987bc98c70d2868a"
+DESIQUANT_SECRET_KEY = "0cf64f9f0b64f6008cf5efe1529c6772daa7d7d0822f5db42a7c6a1e41b3cadf"
+
+# Candles location pattern (symbol + segment)
+# Example seen: s3://desiquant/data/candles/SBIN/EQ.parquet.gz  
+DESIQUANT_CANDLES_BUCKET = "desiquant"
+DESIQUANT_CANDLES_KEY_TEMPLATE = "data/candles/{symbol}/{segment}.parquet"
+DEFAULT_CANDLES_SEGMENT = "EQ"
+
+# News location pattern (symbol)
+# Example seen: s3://desiquant/data/news/TCS.parquet.gz
+DESIQUANT_NEWS_BUCKET = "desiquant"
+DESIQUANT_NEWS_KEY_TEMPLATE = "data/news/{symbol}.parquet"
+
+# Corporate Announcements location pattern (symbol)
+# Example seen: s3://desiquant/data/announcements/bse/TCS.parquet.gz
+DESIQUANT_CORP_ANNOUNCEMENTS_BUCKET = "desiquant"
+DESIQUANT_CORP_ANNOUNCEMENTS_KEY_TEMPLATE = "data/announcements/{source}/{symbol}.parquet"
+DEFAULT_ANNOUNCEMENTS_SOURCE = "bse"
+
+# Financial Results location pattern (symbol)
+# Example seen: s3://desiquant/data/results/nse/TCS.parquet
+DESIQUANT_FINANCIAL_RESULTS_BUCKET = "desiquant"
+DESIQUANT_FINANCIAL_RESULTS_KEY_TEMPLATE = "data/results/nse/{symbol}.parquet"
