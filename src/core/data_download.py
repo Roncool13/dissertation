@@ -1,6 +1,7 @@
 # src/core/data_download.py
 
 # Standard library imports
+import os
 import io
 import json
 import time
@@ -8,6 +9,7 @@ import random
 import zipfile
 import logging
 import datetime as dt
+import tempfile
 from typing import List
 from urllib.parse import quote_plus
 
@@ -24,7 +26,8 @@ import jugaad_data.util as jugaad_util
 from requests.exceptions import JSONDecodeError as RequestsJSONDecodeError
 
 # Local imports
-from src.constants import SYMBOL_TO_COMPANY
+import src.constants as constants
+from src.io.connections import S3Connection
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +316,7 @@ def download_ohlcv_nsepy(symbol: str, start_date: dt.date, end_date: dt.date) ->
 # News: Google News RSS (unchanged)
 # -------------------------
 def _build_google_news_queries(symbol: str) -> List[str]:
-    company = SYMBOL_TO_COMPANY.get(symbol, symbol)
+    company = constants.SYMBOL_TO_COMPANY.get(symbol, symbol)
     queries = [
         f'"{company}" stock',
         f'"{company}" shares',
@@ -386,3 +389,310 @@ def fetch_news_from_provider(
     df.sort_values(["published_at", "source"], inplace=True, na_position="last")
     df.reset_index(drop=True, inplace=True)
     return df
+
+
+class DesiquantCandlesMirror:
+    """Handles download of Desiquant candles and mirroring to the raw S3 zone."""
+
+    def __init__(self):
+        self.constants = constants
+        self.raw_bucket = constants.S3_BUCKET
+        self.raw_prefix = constants.RAW_DESIQUANT_OHLCV_PREFIX
+        self.default_segment = constants.DEFAULT_CANDLES_SEGMENT
+        self.desiquant_bucket = constants.DESIQUANT_CANDLES_BUCKET
+        self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+
+    def _desiquant_storage_options(self):
+        return {
+            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+            "key": self.constants.DESIQUANT_ACCESS_KEY,
+            "secret": self.constants.DESIQUANT_SECRET_KEY,
+            "client_kwargs": {
+                "region_name": "auto"
+            },
+        }
+
+    def build_raw_candles_key(self, symbol: str, segment: str | None = None) -> str:
+        segment = segment or self.default_segment
+        return f"{self.raw_prefix}/{symbol}/{segment}.parquet"
+
+    def build_raw_candles_s3_uri(self, symbol: str, segment: str | None = None) -> str:
+        key = self.build_raw_candles_key(symbol, segment)
+        return f"s3://{self.raw_bucket}/{key}"
+
+    def read_desiquant_candles_df(self, symbol: str, segment: str | None = None) -> pd.DataFrame:
+        """
+        Reads Desiquant candles parquet.gz into a DataFrame using S3-compatible access.
+        """
+        segment = segment or self.default_segment
+        key = self.constants.DESIQUANT_CANDLES_KEY_TEMPLATE.format(symbol=symbol, segment=segment)
+        src_uri = f"s3://{self.desiquant_bucket}/{key}"
+
+        storage_options = self._desiquant_storage_options()
+        logger.info("[RAW] Reading Desiquant candles for %s from %s", symbol, src_uri)
+        df = pd.read_parquet(src_uri, storage_options=storage_options)
+        logger.debug("[RAW] Retrieved %d rows for %s", len(df), symbol)
+        return df
+
+    def _write_parquet_to_raw(self, df: pd.DataFrame, key: str) -> None:
+        """Write parquet to raw S3 via the shared connection helper."""
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            temp_path = tmp.name
+
+        try:
+            self.raw_s3.upload_file(temp_path, key)
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.warning("Failed to clean up temp parquet %s: %s", temp_path, exc)
+
+    def mirror_to_raw(self, symbol: str, overwrite: bool = False, segment: str | None = None) -> str:
+        """
+        Downloads candles for a symbol from Desiquant and stores it in your S3 raw zone.
+        """
+        raw_key = self.build_raw_candles_key(symbol, segment)
+        raw_uri = self.build_raw_candles_s3_uri(symbol, segment)
+
+        if (not overwrite) and self.raw_s3.object_exists(raw_key):
+            logger.info("[RAW] Exists, skipping: %s", raw_uri)
+            return raw_uri
+
+        logger.info("[RAW] Fetching Desiquant candles for %s", symbol)
+        df = self.read_desiquant_candles_df(symbol=symbol, segment=segment)
+
+        # Optional: light normalization (column lowercase)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        logger.info("[RAW] Writing to: %s", raw_uri)
+        self._write_parquet_to_raw(df, raw_key)
+        return raw_uri
+
+
+class DesiquantNewsMirror:
+    """Handles download of Desiquant news and mirroring to the raw S3 zone."""
+
+    def __init__(self):
+        self.constants = constants
+        self.raw_bucket = constants.S3_BUCKET
+        self.raw_prefix = constants.RAW_DESIQUANT_NEWS_PREFIX
+        self.desiquant_bucket = constants.DESIQUANT_NEWS_BUCKET
+        self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+
+    def _desiquant_storage_options(self):
+        return {
+            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+            "key": self.constants.DESIQUANT_ACCESS_KEY,
+            "secret": self.constants.DESIQUANT_SECRET_KEY,
+            "client_kwargs": {
+                "region_name": "auto"
+            },
+        }
+
+    def build_raw_news_key(self, symbol: str) -> str:
+        return f"{self.raw_prefix}/{symbol}/news.parquet"
+
+    def build_raw_news_s3_uri(self, symbol: str) -> str:
+        key = self.build_raw_news_key(symbol)
+        return f"s3://{self.raw_bucket}/{key}"
+
+    def read_desiquant_news_df(self, symbol: str) -> pd.DataFrame:
+        """
+        Reads Desiquant news parquet into a DataFrame using S3-compatible access.
+        """
+        key = self.constants.DESIQUANT_NEWS_KEY_TEMPLATE.format(symbol=symbol)
+        src_uri = f"s3://{self.desiquant_bucket}/{key}"
+
+        storage_options = self._desiquant_storage_options()
+        logger.info("[RAW] Reading Desiquant news for %s from %s", symbol, src_uri)
+        df = pd.read_parquet(src_uri, storage_options=storage_options)
+        logger.debug("[RAW] Retrieved %d rows for %s", len(df), symbol)
+        return df
+
+    def _write_parquet_to_raw(self, df: pd.DataFrame, key: str) -> None:
+        """Write parquet to raw S3 via the shared connection helper."""
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            temp_path = tmp.name
+
+        try:
+            self.raw_s3.upload_file(temp_path, key)
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.warning("Failed to clean up temp parquet %s: %s", temp_path, exc)
+
+    def mirror_to_raw(self, symbol: str, overwrite: bool = False) -> str:
+        """
+        Downloads news for a symbol from Desiquant and stores it in your S3 raw zone.
+        """
+        raw_key = self.build_raw_news_key(symbol)
+        raw_uri = self.build_raw_news_s3_uri(symbol)
+
+        if (not overwrite) and self.raw_s3.object_exists(raw_key):
+            logger.info("[RAW] Exists, skipping: %s", raw_uri)
+            return raw_uri
+
+        logger.info("[RAW] Fetching Desiquant news for %s", symbol)
+        df = self.read_desiquant_news_df(symbol=symbol)
+
+        # Optional: light normalization (column lowercase)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        logger.info("[RAW] Writing to: %s", raw_uri)
+        self._write_parquet_to_raw(df, raw_key)
+        return raw_uri
+    
+
+class DesiquantFinancialResultsMirror:
+    """Handles download of Desiquant financial results and mirroring to the raw S3 zone."""
+
+    def __init__(self):
+        self.constants = constants
+        self.raw_bucket = constants.S3_BUCKET
+        self.raw_prefix = constants.RAW_DESIQUANT_FINANCIALS_PREFIX
+        self.desiquant_bucket = constants.DESIQUANT_FINANCIAL_RESULTS_BUCKET
+        self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+
+    def _desiquant_storage_options(self):
+        return {
+            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+            "key": self.constants.DESIQUANT_ACCESS_KEY,
+            "secret": self.constants.DESIQUANT_SECRET_KEY,
+            "client_kwargs": {
+                "region_name": "auto"
+            },
+        }
+
+    def build_raw_results_key(self, symbol: str) -> str:
+        return f"{self.raw_prefix}/{symbol}/financial_results.parquet"
+
+    def build_raw_results_s3_uri(self, symbol: str) -> str:
+        key = self.build_raw_results_key(symbol)
+        return f"s3://{self.raw_bucket}/{key}"
+
+    def read_desiquant_results_df(self, symbol: str) -> pd.DataFrame:
+        """
+        Reads Desiquant financial results parquet into a DataFrame using S3-compatible access.
+        """
+        key = self.constants.DESIQUANT_FINANCIAL_RESULTS_KEY_TEMPLATE.format(symbol=symbol)
+        src_uri = f"s3://{self.desiquant_bucket}/{key}"
+
+        storage_options = self._desiquant_storage_options()
+        logger.info("[RAW] Reading Desiquant financial results for %s from %s", symbol, src_uri)
+        df = pd.read_parquet(src_uri, storage_options=storage_options)
+        logger.debug("[RAW] Retrieved %d rows for %s", len(df), symbol)
+        return df
+
+    def _write_parquet_to_raw(self, df: pd.DataFrame, key: str) -> None:
+        """Write parquet to raw S3 via the shared connection helper."""
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            temp_path = tmp.name
+
+        try:
+            self.raw_s3.upload_file(temp_path, key)
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.warning("Failed to clean up temp parquet %s: %s", temp_path, exc)
+
+    def mirror_to_raw(self, symbol: str, overwrite: bool = False) -> str:
+        """
+        Downloads news for a symbol from Desiquant and stores it in your S3 raw zone.
+        """
+        raw_key = self.build_raw_results_key(symbol)
+        raw_uri = self.build_raw_results_s3_uri(symbol)
+
+        if (not overwrite) and self.raw_s3.object_exists(raw_key):
+            logger.info("[RAW] Exists, skipping: %s", raw_uri)
+            return raw_uri
+
+        logger.info("[RAW] Fetching Desiquant financial results for %s", symbol)
+        df = self.read_desiquant_results_df(symbol=symbol)
+
+        # Optional: light normalization (column lowercase)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        logger.info("[RAW] Writing to: %s", raw_uri)
+        self._write_parquet_to_raw(df, raw_key)
+        return raw_uri
+
+
+class DesiquantCorporateAnnouncementsMirror:
+    """Handles download of Desiquant corporate announcements and mirroring to the raw S3 zone."""
+
+    def __init__(self):
+        self.constants = constants
+        self.raw_bucket = constants.S3_BUCKET
+        self.raw_prefix = constants.RAW_DESIQUANT_ANNOUNCEMENTS_PREFIX
+        self.desiquant_bucket = constants.DESIQUANT_CORP_ANNOUNCEMENTS_BUCKET
+        self.raw_s3 = S3Connection(bucket=self.raw_bucket)
+
+    def _desiquant_storage_options(self):
+        return {
+            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+            "key": self.constants.DESIQUANT_ACCESS_KEY,
+            "secret": self.constants.DESIQUANT_SECRET_KEY,
+            "client_kwargs": {
+                "region_name": "auto"
+            },
+        }
+
+    def build_raw_announcements_key(self, symbol: str, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> str:
+        return f"{self.raw_prefix}/{symbol}/{source}/corporate_announcements.parquet"
+
+    def build_raw_announcements_s3_uri(self, symbol: str, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> str:
+        key = self.build_raw_announcements_key(symbol, source)
+        return f"s3://{self.raw_bucket}/{key}"
+
+    def read_desiquant_announcements_df(self, symbol: str, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> pd.DataFrame:
+        """
+        Reads Desiquant corporate announcements parquet into a DataFrame using S3-compatible access.
+        """
+        key = self.constants.DESIQUANT_CORP_ANNOUNCEMENTS_KEY_TEMPLATE.format(source=source, symbol=symbol)
+        src_uri = f"s3://{self.desiquant_bucket}/{key}"
+
+        storage_options = self._desiquant_storage_options()
+        logger.info("[RAW] Reading Desiquant corporate announcements for %s from %s", symbol, src_uri)
+        df = pd.read_parquet(src_uri, storage_options=storage_options)
+        logger.debug("[RAW] Retrieved %d rows for %s", len(df), symbol)
+        return df
+
+    def _write_parquet_to_raw(self, df: pd.DataFrame, key: str) -> None:
+        """Write parquet to raw S3 via the shared connection helper."""
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            df.to_parquet(tmp.name, index=False)
+            temp_path = tmp.name
+
+        try:
+            self.raw_s3.upload_file(temp_path, key)
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError as exc:  # pragma: no cover - best-effort cleanup
+                logger.warning("Failed to clean up temp parquet %s: %s", temp_path, exc)
+
+    def mirror_to_raw(self, symbol: str, overwrite: bool = False, source: str = constants.DEFAULT_ANNOUNCEMENTS_SOURCE) -> str:
+        """
+        Downloads corporate announcements for a symbol from Desiquant and stores it in your S3 raw zone.
+        """
+        raw_key = self.build_raw_announcements_key(symbol, source)
+        raw_uri = self.build_raw_announcements_s3_uri(symbol, source)
+
+        if (not overwrite) and self.raw_s3.object_exists(raw_key):
+            logger.info("[RAW] Exists, skipping: %s", raw_uri)
+            return raw_uri
+
+        logger.info("[RAW] Fetching Desiquant corporate announcements for %s", symbol)
+        df = self.read_desiquant_announcements_df(symbol=symbol, source=source)
+
+        # Optional: light normalization (column lowercase)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        logger.info("[RAW] Writing to: %s", raw_uri)
+        self._write_parquet_to_raw(df, raw_key)
+        return raw_uri
