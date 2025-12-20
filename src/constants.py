@@ -82,8 +82,9 @@ DESIQUANT_NEWS_KEY_TEMPLATE = "data/news/{symbol}.parquet.gz"
 DESIQUANT_CORP_ANNOUNCEMENTS_BUCKET = "desiquant"
 DESIQUANT_CORP_ANNOUNCEMENTS_KEY_TEMPLATE = "data/announcements/{source}/{symbol}.parquet.gz"
 DEFAULT_ANNOUNCEMENTS_SOURCE = "bse"
+SUPPORTED_ANNOUNCEMENTS_SOURCES = ["bse", "nse"]
 
 # Financial Results location pattern (symbol)
 # Example seen: s3://desiquant/data/results/nse/TCS.parquet.gz
 DESIQUANT_FINANCIAL_RESULTS_BUCKET = "desiquant"
-DESIQUANT_FINANCIAL_RESULTS_KEY_TEMPLATE = "data/results/nse/{symbol}.parquet.gz"
+DESIQUANT_FINANCIAL_RESULTS_KEY_TEMPLATE = "data/results/nse/{symbol}.parquet"
