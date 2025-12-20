@@ -17,11 +17,6 @@ on:
         required: false
         default: "INFO"
         type: string
-      s3_bucket:
-        description: "Target S3 bucket for raw data"
-        required: false
-        default: ${{ secrets.DIS_S3_BUCKET }}
-        type: string
 
 jobs:
   raw_desiquant:
@@ -32,6 +27,7 @@ jobs:
       contents: read
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_BUCKET: ${{ secrets.DIS_S3_BUCKET }}
 
     steps:
       - name: Checkout repo
@@ -59,7 +55,7 @@ jobs:
         run: |
           CMD="python src/pipelines/run_raw_desiquant_ingestion.py \
             --symbols '${{ inputs.symbols }}' \
-            --s3-bucket '${{ inputs.s3_bucket }}' \
+            --s3-bucket '$S3_BUCKET' \
             --log-level '${{ inputs.log_level }}'"
 
           if [ "${{ inputs.overwrite }}" = "true" ]; then
