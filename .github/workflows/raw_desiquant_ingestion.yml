@@ -1,0 +1,70 @@
+name: Raw Desiquant Ingestion
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Space-separated symbols (e.g. TCS INFY HDFCBANK)"
+        required: true
+        type: string
+      overwrite:
+        description: "Overwrite if object exists"
+        required: true
+        default: false
+        type: boolean
+      log_level:
+        description: "Logging level (e.g. INFO, DEBUG)"
+        required: false
+        default: "INFO"
+        type: string
+      s3_bucket:
+        description: "Target S3 bucket for raw data"
+        required: false
+        default: ${{ secrets.DIS_S3_BUCKET }}
+        type: string
+
+jobs:
+  raw_desiquant:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+    
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run raw Desiquant ingestion
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          CMD="python src/pipelines/run_raw_desiquant_ingestion.py \
+            --symbols '${{ inputs.symbols }}' \
+            --s3-bucket '${{ inputs.s3_bucket }}' \
+            --log-level '${{ inputs.log_level }}'"
+
+          if [ "${{ inputs.overwrite }}" = "true" ]; then
+            CMD="$CMD --overwrite"
+          fi
+
+          echo "Running: $CMD"
+          eval "$CMD"
