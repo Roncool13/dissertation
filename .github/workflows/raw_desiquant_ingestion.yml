@@ -1,4 +1,5 @@
 name: Raw Desiquant Ingestion
+# Ingest raw OHLCV, News, Corporate Announcements, and Financial Results data from Desiquant and store in S3 raw zone.
 
 on:
   workflow_dispatch:
