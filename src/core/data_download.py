@@ -404,11 +404,11 @@ class DesiquantCandlesMirror:
 
     def _desiquant_storage_options(self):
         return {
-            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
             "client_kwargs": {
-                "region_name": "auto"
+                "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+                "region_name": "auto",
             },
         }
 
@@ -482,11 +482,11 @@ class DesiquantNewsMirror:
 
     def _desiquant_storage_options(self):
         return {
-            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
             "client_kwargs": {
-                "region_name": "auto"
+                "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+                "region_name": "auto",
             },
         }
 
@@ -558,11 +558,11 @@ class DesiquantFinancialResultsMirror:
 
     def _desiquant_storage_options(self):
         return {
-            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
             "client_kwargs": {
-                "region_name": "auto"
+                "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+                "region_name": "auto",
             },
         }
 
@@ -634,11 +634,11 @@ class DesiquantCorporateAnnouncementsMirror:
 
     def _desiquant_storage_options(self):
         return {
-            "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
             "key": self.constants.DESIQUANT_ACCESS_KEY,
             "secret": self.constants.DESIQUANT_SECRET_KEY,
             "client_kwargs": {
-                "region_name": "auto"
+                "endpoint_url": self.constants.DESIQUANT_ENDPOINT_URL,
+                "region_name": "auto",
             },
         }
 
