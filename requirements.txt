@@ -5,6 +5,7 @@ requests
 numpy
 pandas
 pyarrow
+s3fs
 sentence-transformers>=2.2.2
 torch
 tqdm
