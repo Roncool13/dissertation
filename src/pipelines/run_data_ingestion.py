@@ -170,7 +170,7 @@ class OHLCVIngestor:
             self.logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start, end)
             return
 
-        df = clean_ohlcv_data(df)
+        df = clean_ohlcv_data(df, self.config.symbol)
         if df.empty:
             raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year} start={start} end={end} after cleaning.")
 
