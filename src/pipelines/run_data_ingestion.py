@@ -42,7 +42,7 @@ class IngestConfig:
     news_rel_prefix: str = constants.NEWS_REL_S3_PREFIX
 
 
-def _year_end_date(year: int, latest: dt.date) -> dt.date:
+def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
     """
     Use T-2 business days for the current year, otherwise December 31st.
     """
@@ -51,12 +51,12 @@ def _year_end_date(year: int, latest: dt.date) -> dt.date:
         logging.getLogger(__name__).debug(
             "Adjusted end date for year %s from %s to earliest allowed %s", year, end_date, latest
         )
-        return latest
+        return pd.to_datetime(latest)
     logging.getLogger(__name__).debug("Computed year-end date for %s: %s", year, end_date)
-    return end_date
+    return pd.to_datetime(end_date)
 
 
-def _year_start_date(year: int, earliest: dt.date) -> dt.date:
+def _year_start_date(year: int, earliest: dt.date) -> pd.Timestamp:
     """
     Use January 1st of the year, but not before the earliest allowed date.
     """
@@ -65,9 +65,9 @@ def _year_start_date(year: int, earliest: dt.date) -> dt.date:
         logging.getLogger(__name__).debug(
             "Adjusted start date for year %s from %s to earliest allowed %s", year, start_date, earliest
         )
-        return earliest
+        return pd.to_datetime(earliest)
     logging.getLogger(__name__).debug("Computed year-start date for %s: %s", year, start_date)
-    return start_date
+    return pd.to_datetime(start_date)
 
 
 class S3Client:
