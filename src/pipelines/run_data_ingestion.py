@@ -197,8 +197,8 @@ class OHLCVIngestor:
         self.logger.info("Need to ingest OHLCV data for %s year(s).", len(keys))
 
         daily_df = self.fetch_raw_data()
-        earliest = daily_df["date"].min()
-        latest = daily_df["date"].max()
+        earliest = daily_df["date"].min().date()
+        latest = daily_df["date"].max().date()
         self.logger.info("Available daily OHLCV date range: %s to %s", earliest, latest)
 
         for year, key in zip(years_to_process, keys):
@@ -339,8 +339,8 @@ class NewsIngestor:
         self.logger.info("Need to ingest NEWS+REL data for %s year(s).", len(rel_keys))
 
         raw_df = self.fetch_raw_data()
-        earliest = raw_df["date"].min()
-        latest = raw_df["date"].max()
+        earliest = raw_df["date"].min().date()
+        latest = raw_df["date"].max().date()
         self.logger.info("Available raw NEWS date range: %s to %s", earliest, latest)
 
         for y, ck, rk in zip(years, clean_keys, rel_keys):
