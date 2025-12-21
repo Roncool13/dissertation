@@ -51,7 +51,7 @@ def clean_ohlcv_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["high"] >= df["low"]]
     logger.debug("Filtered %s rows with invalid price data", before_filter - len(df))
 
-    df.sort_values(["symbol", "date"], inplace=True)
+    df.sort_values(["date"], inplace=True)
     df.reset_index(drop=True, inplace=True)
     logger.info("Completed OHLCV clean with %s rows for %s symbols", len(df), df["symbol"].nunique())
 
