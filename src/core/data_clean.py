@@ -12,7 +12,7 @@ COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume"]
 logger = logging.getLogger(__name__)
 
 
-def clean_ohlcv_data(df: pd.DataFrame) -> pd.DataFrame:
+def clean_ohlcv_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """
     Clean OHLCV data and return canonical minimal schema:
     date, symbol, open, high, low, close, volume
@@ -42,7 +42,7 @@ def clean_ohlcv_data(df: pd.DataFrame) -> pd.DataFrame:
     df.dropna(subset=["open", "high", "low", "close"], inplace=True)
     logger.debug("Dropped %s rows with NaNs in price columns", before_dropna - len(df))
     before_dupes = len(df)
-    df.drop_duplicates(subset=["symbol", "date"], inplace=True)
+    df.drop_duplicates(subset=["date"], inplace=True)
     logger.debug("Removed %s duplicate OHLCV rows", before_dupes - len(df))
 
     # filter out obviously bad rows
@@ -53,6 +53,10 @@ def clean_ohlcv_data(df: pd.DataFrame) -> pd.DataFrame:
 
     df.sort_values(["date"], inplace=True)
     df.reset_index(drop=True, inplace=True)
+
+    # Insert symbol column
+    df.insert(0, 'symbol', symbol)
+    
     logger.info("Completed OHLCV clean with %s rows for %s symbols", len(df), df["symbol"].nunique())
 
     return df
