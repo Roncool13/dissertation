@@ -54,3 +54,8 @@ class S3Connection:
         logger.info("Uploading %s to s3://%s/%s", local_path, self.bucket, key)
         self.s3_client.upload_file(str(local_path), self.bucket, key)
         logger.info("Upload complete for s3://%s/%s", self.bucket, key)
+
+    def download_file(self, key: str, local_path: str | Path) -> None:
+        logger.info("Downloading s3://%s/%s to %s", self.bucket, key, local_path)
+        self.s3_client.download_file(self.bucket, key, str(local_path))
+        logger.info("Download complete for s3://%s/%s", self.bucket, key)
