@@ -19,11 +19,17 @@ def aggregate_intraday_to_daily(df: pd.DataFrame) -> pd.DataFrame:
 
     # Normalize datetime column
     if "datetime" in df.columns:
+        logger.debug("Using 'datetime' column as timestamp")
         ts = pd.to_datetime(df["datetime"])
     elif "date" in df.columns and "time" in df.columns:
+        logger.debug("Using 'date' and 'time' columns as timestamp")
         ts = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str))
     elif "timestamp" in df.columns:
+        logger.debug("Using 'timestamp' column as timestamp")
         ts = pd.to_datetime(df["timestamp"])
+    elif "date" in df.columns:
+        logger.debug("Using 'date' column as timestamp")
+        ts = pd.to_datetime(df["date"])
     else:
         raise ValueError("No recognizable timestamp column in raw candles data")
 
