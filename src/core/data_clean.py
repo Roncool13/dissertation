@@ -7,7 +7,7 @@ import logging
 # Third-party imports
 import pandas as pd
 
-COLUMNS = ["date", "symbol", "open", "high", "low", "close", "volume"]
+COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def clean_ohlcv_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
     # Insert symbol column
     df.insert(0, 'symbol', symbol)
-    
+
     logger.info("Completed OHLCV clean with %s rows for %s symbols", len(df), df["symbol"].nunique())
 
     return df
