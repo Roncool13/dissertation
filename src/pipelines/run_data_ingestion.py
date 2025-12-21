@@ -4,9 +4,11 @@
 import argparse
 import datetime as dt
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Callable, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -16,16 +18,10 @@ from pandas.tseries.offsets import BDay
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
+import src.constants as constants
 from src.config import setup_logging
-from src.constants import (
-    NSE_SYMBOLS,
-    S3_BUCKET,
-    OHLCV_S3_PREFIX,
-    NEWS_CLEAN_S3_PREFIX,
-    NEWS_REL_S3_PREFIX,
-)
-from src.core.data_download import download_ohlcv_nsepy, fetch_news_from_provider
 from src.core.data_clean import clean_ohlcv_data, clean_news_data
+from src.core.data_transformations import aggregate_intraday_to_daily
 from src.io.connections import S3Connection
 from src.nlp.relevance_scoring import RelevanceScorer
 
@@ -39,23 +35,39 @@ class IngestConfig:
     s3_bucket: str
 
     # Prefixes
-    ohlcv_prefix: str = OHLCV_S3_PREFIX
-    news_clean_prefix: str = NEWS_CLEAN_S3_PREFIX
-    news_rel_prefix: str = NEWS_REL_S3_PREFIX
+    ohlcv_prefix: str = constants.OHLCV_S3_PREFIX
+    ohlcv_raw_prefix: str = constants.RAW_DESIQUANT_OHLCV_PREFIX
+    news_raw_prefix: str = constants.RAW_DESIQUANT_NEWS_PREFIX
+    news_clean_prefix: str = constants.NEWS_CLEAN_S3_PREFIX
+    news_rel_prefix: str = constants.NEWS_REL_S3_PREFIX
 
 
-def _year_end_date(year: int) -> dt.date:
+def _year_end_date(year: int, latest: dt.date) -> dt.date:
     """
     Use T-2 business days for the current year, otherwise December 31st.
     """
-    today = pd.Timestamp.today().normalize()
-    if year == today.year:
-        end_date = (today - BDay(10)).date()
-        logging.getLogger(__name__).debug("Computed rolling end date (T-10 BDays) for current year %s: %s", year, end_date)
-        return end_date
     end_date = dt.date(year, 12, 31)
+    if end_date > latest:
+        logging.getLogger(__name__).debug(
+            "Adjusted end date for year %s from %s to earliest allowed %s", year, end_date, latest
+        )
+        return latest
     logging.getLogger(__name__).debug("Computed year-end date for %s: %s", year, end_date)
-    return dt.date(year, 12, 31)
+    return end_date
+
+
+def _year_start_date(year: int, earliest: dt.date) -> dt.date:
+    """
+    Use January 1st of the year, but not before the earliest allowed date.
+    """
+    start_date = dt.date(year, 1, 1)
+    if start_date < earliest:
+        logging.getLogger(__name__).debug(
+            "Adjusted start date for year %s from %s to earliest allowed %s", year, start_date, earliest
+        )
+        return earliest
+    logging.getLogger(__name__).debug("Computed year-start date for %s: %s", year, start_date)
+    return start_date
 
 
 class S3Client:
@@ -73,6 +85,10 @@ class S3Client:
 
     def upload(self, local_path: Path, key: str) -> None:
         self._conn.upload_file(local_path, key)
+
+    def download(self, key: str, local_path: Path) -> None:
+        self._conn.download_file(key, local_path)
+
 
 
 class OHLCVIngestor:
@@ -97,12 +113,16 @@ class OHLCVIngestor:
 
     @staticmethod
     def validate_symbol(symbol: str) -> None:
-        if symbol not in NSE_SYMBOLS:
+        if symbol not in constants.NSE_SYMBOLS:
             raise ValueError(f"Symbol {symbol!r} is not a valid NSE symbol.")
 
     @staticmethod
     def _s3_object_key(prefix: str, symbol: str, year: int) -> str:
         return f"{prefix}/{symbol}/{year}/ohlcv.parquet"
+    
+    @staticmethod
+    def _raw_s3_object_key(prefix: str, symbol: str) -> str:
+        return f"{prefix}/{symbol}/EQ.parquet"
 
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
@@ -118,21 +138,41 @@ class OHLCVIngestor:
                 remaining_keys.append(key)
 
         return remaining_years, remaining_keys
+    
+    def fetch_raw_data(self) -> pd.DataFrame:
+        raw_key = self._raw_s3_object_key(self.config.ohlcv_raw_prefix, self.config.symbol)
+        self.logger.info("Reading RAW candles from s3://%s/%s", self.config.s3_bucket, raw_key)
 
-    def ingest_year(self, year: int, key: str) -> None:
-        start = dt.date(year, 1, 1)
-        end = _year_end_date(year)
-        if end < start:
-            self.logger.warning("Computed end date %s is before start %s; adjusting to start", end, start)
-            end = start
+        with tempfile.TemporaryDirectory() as td:
+            raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
+            if not self.s3.exists(raw_key):
+                raise FileNotFoundError(f"RAW candles not found at s3://{self.config.s3_bucket}/{raw_key}")
 
-        self.logger.info("Downloading OHLCV for %s from %s to %s...", self.config.symbol, start, end)
-        df = download_ohlcv_nsepy(self.config.symbol, start, end)
-        self.logger.info("Downloaded %s rows. Cleaning data...", len(df))
+            self.s3.download(raw_key, raw_local)
+            raw_df = pd.read_parquet(raw_local)
+
+            self.logger.info("Raw rows: %d", len(raw_df))
+
+            daily_df = aggregate_intraday_to_daily(raw_df)
+            self.logger.info("Daily rows: %d", len(daily_df))
+
+            return daily_df
+
+    def ingest_year(self, year: int, key: str, df: pd.DataFrame, daily_start: dt.date, daily_end: dt.date) -> None:
+        start = _year_start_date(year, daily_start)
+        end = _year_end_date(year, daily_end)
+
+        self.logger.info("Ingesting OHLCV for year %s: %s to %s", year, start, end)
+
+        self.logger.info("Filtering OHLCV for year %s: %s to %s...", year, start, end)
+        df = df[(df["date"] >= start) & (df["date"] <= end)]
+        if df.empty:
+            self.logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start, end)
+            return
 
         df = clean_ohlcv_data(df)
         if df.empty:
-            raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year}")
+            raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year} start={start} end={end} after cleaning.")
 
         self.logger.info("Cleaned OHLCV has %s rows. Saving and uploading to S3...", len(df))
         self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
@@ -155,8 +195,14 @@ class OHLCVIngestor:
             return
 
         self.logger.info("Need to ingest OHLCV data for %s year(s).", len(keys))
+
+        daily_df = self.fetch_raw_data()
+        earliest = daily_df["date"].min()
+        latest = daily_df["date"].max()
+        self.logger.info("Available daily OHLCV date range: %s to %s", earliest, latest)
+
         for year, key in zip(years_to_process, keys):
-            self.ingest_year(year, key)
+            self.ingest_year(year, key, daily_df, earliest, latest)
 
         self.logger.info("OHLCV ingestion complete.")
 
@@ -189,6 +235,10 @@ class NewsIngestor:
     @staticmethod
     def _s3_rel_key(prefix: str, symbol: str, year: int) -> str:
         return f"{prefix}/{symbol}/{year}/news_rel.parquet"
+    
+    @staticmethod
+    def _raw_s3_object_key(prefix: str, symbol: str) -> str:
+        return f"{prefix}/{symbol}/news.parquet"
 
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
@@ -209,19 +259,42 @@ class NewsIngestor:
                 remaining_rel.append(rk)
 
         return remaining_years, remaining_clean, remaining_rel
+    
+    def fetch_raw_data(self) -> pd.DataFrame:
+        raw_key = self._raw_s3_object_key(self.config.news_raw_prefix, self.config.symbol)
+        self.logger.info("Reading RAW news from s3://%s/%s", self.config.s3_bucket, raw_key)
 
-    def ingest_year(self, year: int, clean_key: str, rel_key: str) -> None:
-        start = dt.date(year, 1, 1)
-        end = _year_end_date(year)
-        if end < start:
-            self.logger.warning("Computed end date %s is before start %s; adjusting to start", end, start)
-            end = start
+        with tempfile.TemporaryDirectory() as td:
+            raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
+            if not self.s3.exists(raw_key):
+                raise FileNotFoundError(f"RAW news not found at s3://{self.config.s3_bucket}/{raw_key}")
 
-        self.logger.info("Fetching NEWS for %s from %s to %s...", self.config.symbol, start, end)
-        raw = fetch_news_from_provider(self.config.symbol, start, end)
+            self.s3.download(raw_key, raw_local)
+            raw_df = pd.read_parquet(raw_local)
 
-        self.logger.info("Fetched %s raw news rows. Cleaning...", len(raw))
-        news_clean = clean_news_data(raw, self.config.symbol, start, end)
+            self.logger.info("Raw rows: %d", len(raw_df))
+
+            return raw_df
+
+    def ingest_year(self, year: int, clean_key: str, rel_key: str, df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
+        start = _year_start_date(year, earliest)
+        end = _year_end_date(year, latest)
+
+        self.logger.info("Ingesting NEWS for %s from %s to %s...", self.config.symbol, start, end)
+        # raw = fetch_news_from_provider(self.config.symbol, start, end)
+
+        self.logger.info("Filtering NEWS for year %s: %s to %s...", year, start, end)
+        df = df[(df["date"] >= start) & (df["date"] <= end)]
+        if df.empty:
+            self.logger.warning("No NEWS data for %s after filtering %s → %s", self.config.symbol, start, end)
+            return
+
+        self.logger.info("Fetched %s raw news rows. Cleaning...", len(df))
+        news_clean = clean_news_data(df, self.config.symbol, start, end)
+        if news_clean.empty:
+            raise RuntimeError(f"[VALIDATION] NEWS empty for {self.config.symbol} year={year}, {self.config.symbol}, start, end")
+
+        self.logger.info("Cleaned NEWS has %s rows. Saving and uploading to S3...", len(news_clean))
 
         self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -264,8 +337,14 @@ class NewsIngestor:
             return
 
         self.logger.info("Need to ingest NEWS+REL data for %s year(s).", len(rel_keys))
+
+        raw_df = self.fetch_raw_data()
+        earliest = raw_df["date"].min()
+        latest = raw_df["date"].max()
+        self.logger.info("Available raw NEWS date range: %s to %s", earliest, latest)
+
         for y, ck, rk in zip(years, clean_keys, rel_keys):
-            self.ingest_year(y, ck, rk)
+            self.ingest_year(y, ck, rk, raw_df,earliest, latest)
 
         self.logger.info("News ingestion complete.")
 
@@ -309,7 +388,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--start", type=str, required=True, help="Start year YYYY")
     parser.add_argument("--end", type=str, required=True, help="End year YYYY")
     parser.add_argument("--local-output", type=str, default="/tmp/ingest.parquet", help="Local temp parquet stem")
-    parser.add_argument("--s3-bucket", type=str, default=S3_BUCKET, help="S3 bucket name")
+    parser.add_argument("--s3-bucket", type=str, default=constants.S3_BUCKET, help="S3 bucket name")
     parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
     parser.add_argument("--news-only", action="store_true", help="Only ingest news + relevance.")
     parser.add_argument(
