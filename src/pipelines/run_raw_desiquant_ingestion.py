@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
 from src.config import setup_logging
-import src.constants as constants
+import src.constants.storage as storage_constants
 from src.core.data_download import (
     DesiquantCandlesMirror,
     DesiquantNewsMirror,
@@ -74,8 +74,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--s3-bucket",
         type=str,
-        default=constants.S3_BUCKET,
-        help="Target S3 bucket for raw data (defaults to constants.S3_BUCKET)",
+        default=storage_constants.S3_BUCKET,
+        help="Target S3 bucket for raw data (defaults to storage_constants.S3_BUCKET)",
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite if object already exists in S3.")
     parser.add_argument(
