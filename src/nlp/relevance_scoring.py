@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, util
 
-from src.constants import SYMBOL_TO_DESCRIPTION
+from src.constants.symbols import SYMBOL_TO_DESCRIPTION
 
 
 DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
