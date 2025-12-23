@@ -18,7 +18,8 @@ from pandas.tseries.offsets import BDay
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
-import src.constants as constants
+import src.constants.symbols as symbols_constants
+import src.constants.storage as storage_constants
 from src.config import setup_logging
 from src.core.data_clean import clean_ohlcv_data, clean_news_data
 from src.core.data_transformations import aggregate_intraday_to_daily
@@ -35,12 +36,11 @@ class IngestConfig:
     s3_bucket: str
 
     # Prefixes
-    ohlcv_prefix: str = constants.OHLCV_S3_PREFIX
-    ohlcv_raw_prefix: str = constants.RAW_DESIQUANT_OHLCV_PREFIX
-    news_raw_prefix: str = constants.RAW_DESIQUANT_NEWS_PREFIX
-    news_clean_prefix: str = constants.NEWS_CLEAN_S3_PREFIX
-    news_rel_prefix: str = constants.NEWS_REL_S3_PREFIX
-
+    ohlcv_processed_prefix: str = storage_constants.PROCESSED_OHLCV_PREFIX
+    ohlcv_raw_prefix: str = storage_constants.RAW_DESIQUANT_OHLCV_PREFIX
+    news_raw_prefix: str = storage_constants.RAW_DESIQUANT_NEWS_PREFIX
+    news_clean_prefix: str = storage_constants.NEWS_CLEAN_S3_PREFIX
+    news_rel_prefix: str = storage_constants.NEWS_REL_S3_PREFIX
 
 def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
     """
@@ -113,7 +113,7 @@ class OHLCVIngestor:
 
     @staticmethod
     def validate_symbol(symbol: str) -> None:
-        if symbol not in constants.NSE_SYMBOLS:
+        if symbol not in symbols_constants.NSE_SYMBOLS:
             raise ValueError(f"Symbol {symbol!r} is not a valid NSE symbol.")
 
     @staticmethod
@@ -126,7 +126,7 @@ class OHLCVIngestor:
 
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        keys = [self._s3_object_key(self.config.ohlcv_prefix, self.config.symbol, y) for y in years]
+        keys = [self._s3_object_key(self.config.ohlcv_processed_prefix, self.config.symbol, y) for y in years]
 
         remaining_years: List[int] = []
         remaining_keys: List[str] = []
@@ -388,7 +388,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--start", type=str, required=True, help="Start year YYYY")
     parser.add_argument("--end", type=str, required=True, help="End year YYYY")
     parser.add_argument("--local-output", type=str, default="/tmp/ingest.parquet", help="Local temp parquet stem")
-    parser.add_argument("--s3-bucket", type=str, default=constants.S3_BUCKET, help="S3 bucket name")
+    parser.add_argument("--s3-bucket", type=str, default=storage_constants.S3_BUCKET, help="S3 bucket name")
     parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
     parser.add_argument("--news-only", action="store_true", help="Only ingest news + relevance.")
     parser.add_argument(
