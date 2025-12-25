@@ -1,4 +1,4 @@
-name: Data Ingestion – OHLCV + News
+name: Data Ingestion – OHLCV + News + Corporate Announcements + Financial Results
 
 on:
   workflow_dispatch:
@@ -31,7 +31,19 @@ on:
         type: boolean
 
       ingest_news:
-        description: "Ingest News + Relevance data"
+        description: "Ingest News data"
+        required: true
+        default: true
+        type: boolean
+      
+      ingest_corporate_announcements:
+        description: "Ingest Corporate Announcements data"
+        required: true
+        default: true
+        type: boolean
+      
+      ingest_financial_results:
+        description: "Ingest Financial Results data"
         required: true
         default: true
         type: boolean
@@ -90,11 +102,15 @@ jobs:
           # Your script supports:
           #   --ohlcv-only  => disables news
           #   --news-only   => disables ohlcv
-          if [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_news }}" = "true" ]; then
+          if [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_news }}" = "true" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
             CMD="$CMD --news-only"
-          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "true" ]; then
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "true" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
             CMD="$CMD --ohlcv-only"
-          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "false" ]; then
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "true" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
+            CMD="$CMD --corporate-announcements-only"
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "true" ]; then
+            CMD="$CMD --financial-results-only"
+          elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
             echo "ERROR: Both ingest_ohlcv and ingest_news are false. Nothing to run."
             exit 1
           fi
