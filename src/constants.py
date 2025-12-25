@@ -53,13 +53,20 @@ NEWS_S3_PREFIX = "news"
 NEWS_CLEAN_S3_PREFIX = "news_clean"
 NEWS_REL_S3_PREFIX = "news_clean_relevance"
 RAW_S3_PREFIX = "raw"
-PROCESSED_OHLCV_PREFIX = "ohlcv"  # you already effectively use this pattern
+PROCESSED_S3_PREFIX = "processed"
 
+#  Raw-zone Desiquant data prefixes
 RAW_DESIQUANT_PREFIX = f"{RAW_S3_PREFIX}/desiquant"
 RAW_DESIQUANT_OHLCV_PREFIX = f"{RAW_DESIQUANT_PREFIX}/candles"   # intraday parquet per symbol
 RAW_DESIQUANT_NEWS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/news"      # news parquet per symbol
-RAW_DESIQUANT_ANNOUNCEMENTS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/announcements"  # corp announcements per symbol
-RAW_DESIQUANT_FINANCIALS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/results"  # financial results per symbol
+RAW_DESIQUANT_FINANCIALS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/financial_results"  # financial results per symbol
+RAW_DESIQUANT_ANNOUNCEMENTS_PREFIX = f"{RAW_DESIQUANT_PREFIX}/corporate_announcements"  # corp announcements per symbol
+
+# Processed-zone data prefixes
+PROCESSED_OHLCV_PREFIX = f"{PROCESSED_S3_PREFIX}/ohlcv"
+PROCESSED_NEWS_PREFIX = f"{PROCESSED_S3_PREFIX}/news"
+PROCESSED_FINANCIALS_PREFIX = f"{PROCESSED_S3_PREFIX}/financial_results"
+PROCESSED_ANNOUNCEMENTS_PREFIX = f"{PROCESSED_S3_PREFIX}/corporate_announcements"
 
 # Desiquant dataset access (R2 endpoint via S3-compatible API)
 DESIQUANT_ENDPOINT_URL = "https://cbabd13f6c54798a9ec05df5b8070a6e.r2.cloudflarestorage.com"
