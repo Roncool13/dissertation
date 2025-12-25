@@ -3,13 +3,11 @@
 # Standard library imports
 import os
 import logging
-from abc import ABC, abstractmethod
 import tempfile
-from urllib.parse import quote_plus
+from abc import ABC
 
 # Third-party imports
 import pandas as pd
-import datetime as dt
 
 # Local imports
 import src.constants.storage as storage_constants
@@ -27,7 +25,7 @@ class _BaseDesiquantMirror(ABC):
         self.desiquant_constants = desiquant_constants
         self.raw_bucket = storage_constants.S3_BUCKET
         self.raw_prefix = raw_prefix
-        self.raw_filename = raw_filename.format(timestamp=dt.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        self.raw_filename = raw_filename
         self.desiquant_bucket = desiquant_bucket
         self.raw_s3 = S3Connection(bucket=self.raw_bucket)
         self.logger_label = logger_label
