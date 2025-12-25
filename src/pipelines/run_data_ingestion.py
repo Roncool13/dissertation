@@ -1,16 +1,18 @@
 # src/pipelines/run_ohlcv_ingestion.py
 
 # Standard library imports
+import os
+import sys
 import argparse
 import datetime as dt
 import logging
-import os
-import sys
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
 from typing import Callable, List, Optional, Sequence, Tuple
 
+# Third-party imports
 import pandas as pd
 from pandas.tseries.offsets import BDay
 
@@ -21,11 +23,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import src.constants.symbols as symbols_constants
 import src.constants.storage as storage_constants
 from src.config import setup_logging
-from src.core.data_clean import clean_ohlcv_data, clean_news_data
 from src.core.data_transformations import aggregate_intraday_to_daily
 from src.io.connections import S3Connection
 from src.nlp.relevance_scoring import RelevanceScorer
+from src.core.data_clean import (
+    clean_ohlcv_data, 
+    clean_news_data,
+    clean_desiq_news_data,
+    clean_desiq_corporate_announcements,
+    clean_desiq_financial_results,
+)
 
+
+# Logger Config
+logger = logging.getLogger(__name__)
 
 @dataclass
 class IngestConfig:
@@ -35,12 +46,29 @@ class IngestConfig:
     local_output: Path
     s3_bucket: str
 
-    # Prefixes
-    ohlcv_processed_prefix: str = storage_constants.PROCESSED_OHLCV_PREFIX
+    # Raw Prefixes
     ohlcv_raw_prefix: str = storage_constants.RAW_DESIQUANT_OHLCV_PREFIX
     news_raw_prefix: str = storage_constants.RAW_DESIQUANT_NEWS_PREFIX
-    news_clean_prefix: str = storage_constants.NEWS_CLEAN_S3_PREFIX
-    news_rel_prefix: str = storage_constants.NEWS_REL_S3_PREFIX
+    results_raw_prefix: str = storage_constants.RAW_DESIQUANT_FIN_RESULTS_PREFIX
+    announcements_raw_prefix: str = storage_constants.RAW_DESIQUANT_CORP_ANN_PREFIX
+
+    # Processed Prefixes
+    ohlcv_processed_prefix: str = storage_constants.PROCESSED_OHLCV_PREFIX
+    news_processed_prefix: str = storage_constants.PROCESSED_NEWS_PREFIX
+    results_processed_prefix: str = storage_constants.PROCESSED_FIN_RESULTS_PREFIX
+    announcements_processed_prefix: str = storage_constants.PROCESSED_CORP_ANN_PREFIX
+
+    # Raw Filenames
+    ohlcv_raw_filename: str = storage_constants.RAW_OHLCV_FILENAME
+    news_raw_filename: str = storage_constants.RAW_NEWS_FILENAME
+    results_raw_filename: str = storage_constants.RAW_FIN_RESULTS_FILENAME
+    announcements_raw_filename: str = storage_constants.RAW_CORP_ANN_FILENAME
+
+    # Processed Filenames
+    ohlcv_processed_filename: str = storage_constants.PROCESSED_OHLCV_FILENAME
+    news_processed_filename: str = storage_constants.PROCESSED_NEWS_FILENAME
+    results_processed_filename: str = storage_constants.PROCESSED_FIN_RESULTS_FILENAME
+    announcements_processed_filename: str = storage_constants.PROCESSED_CORP_ANN_FILENAME
 
 def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
     """
@@ -48,11 +76,11 @@ def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
     """
     end_date = dt.date(year, 12, 31)
     if end_date > latest:
-        logging.getLogger(__name__).debug(
+        logger.debug(
             "Adjusted end date for year %s from %s to earliest allowed %s", year, end_date, latest
         )
         return pd.to_datetime(latest)
-    logging.getLogger(__name__).debug("Computed year-end date for %s: %s", year, end_date)
+    logger.debug("Computed year-end date for %s: %s", year, end_date)
     return pd.to_datetime(end_date)
 
 
@@ -62,11 +90,11 @@ def _year_start_date(year: int, earliest: dt.date) -> pd.Timestamp:
     """
     start_date = dt.date(year, 1, 1)
     if start_date < earliest:
-        logging.getLogger(__name__).debug(
+        logger.debug(
             "Adjusted start date for year %s from %s to earliest allowed %s", year, start_date, earliest
         )
         return pd.to_datetime(earliest)
-    logging.getLogger(__name__).debug("Computed year-start date for %s: %s", year, start_date)
+    logger.debug("Computed year-start date for %s: %s", year, start_date)
     return pd.to_datetime(start_date)
 
 
@@ -90,13 +118,10 @@ class S3Client:
         self._conn.download_file(key, local_path)
 
 
-
 class OHLCVIngestor:
     """
     Encapsulates the OHLCV ingestion pipeline.
     """
-
-    logger = logging.getLogger(__name__)
 
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
@@ -117,31 +142,33 @@ class OHLCVIngestor:
             raise ValueError(f"Symbol {symbol!r} is not a valid NSE symbol.")
 
     @staticmethod
-    def _s3_object_key(prefix: str, symbol: str, year: int) -> str:
-        return f"{prefix}/{symbol}/{year}/ohlcv.parquet"
+    def _processed_s3_object_key(prefix: str, symbol: str, year: int, filename: str) -> str:
+        # e.g., processesd/ohlcv/TCS/2023/ohlcv_processed.parquet
+        return f"{prefix}/{symbol}/{year}/{filename}"
     
     @staticmethod
-    def _raw_s3_object_key(prefix: str, symbol: str) -> str:
-        return f"{prefix}/{symbol}/EQ.parquet"
+    def _raw_s3_object_key(prefix: str, symbol: str, raw_filename: str) -> str:
+        # e.g., raw/ohlcv/TCS/ohlcv_raw.parquet
+        return f"{prefix}/{symbol}/{raw_filename}"
 
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        keys = [self._s3_object_key(self.config.ohlcv_processed_prefix, self.config.symbol, y) for y in years]
+        processed_keys = [self._processed_s3_object_key(self.config.ohlcv_processed_prefix, self.config.symbol, y, self.config.ohlcv_processed_filename) for y in years]
 
         remaining_years: List[int] = []
-        remaining_keys: List[str] = []
-        for y, key in zip(years, keys):
+        remaining_processed: List[str] = []
+        for y, key in zip(years, processed_keys):
             if self.s3.exists(key):
-                self.logger.info("OHLCV exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+                logger.info("OHLCV exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
             else:
                 remaining_years.append(y)
-                remaining_keys.append(key)
+                remaining_processed.append(key)
 
-        return remaining_years, remaining_keys
+        return remaining_years, remaining_processed
     
     def fetch_raw_data(self) -> pd.DataFrame:
-        raw_key = self._raw_s3_object_key(self.config.ohlcv_raw_prefix, self.config.symbol)
-        self.logger.info("Reading RAW candles from s3://%s/%s", self.config.s3_bucket, raw_key)
+        raw_key = self._raw_s3_object_key(self.config.ohlcv_raw_prefix, self.config.symbol, self.config.ohlcv_raw_filename)
+        logger.info("Reading RAW candles from s3://%s/%s", self.config.s3_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
@@ -151,60 +178,61 @@ class OHLCVIngestor:
             self.s3.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
-            self.logger.info("Raw rows: %d", len(raw_df))
+            logger.info("Raw rows: %d", len(raw_df))
 
             daily_df = aggregate_intraday_to_daily(raw_df)
-            self.logger.info("Daily rows: %d", len(daily_df))
+            logger.info("Daily rows: %d", len(daily_df))
 
             return daily_df
 
-    def ingest_year(self, year: int, key: str, df: pd.DataFrame, daily_start: dt.date, daily_end: dt.date) -> None:
-        start = _year_start_date(year, daily_start)
-        end = _year_end_date(year, daily_end)
+    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, daily_start: dt.date, daily_end: dt.date) -> None:
+        start_date = _year_start_date(year, daily_start)
+        end_date = _year_end_date(year, daily_end)
 
-        self.logger.info("Ingesting OHLCV for year %s: %s to %s", year, start, end)
+        logger.info("Ingesting OHLCV for year %s: %s to %s", year, start_date, end_date)
 
-        self.logger.info("Filtering OHLCV for year %s: %s to %s...", year, start, end)
-        df = df[(df["date"] >= start) & (df["date"] <= end)]
+        logger.info("Filtering OHLCV for year %s: %s to %s...", year, start_date, end_date)
+        df = raw_df[(raw_df["date"] >= start_date) & (raw_df["date"] <= end_date)]
         if df.empty:
-            self.logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start, end)
+            logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start_date, end_date)
             return
 
         df = clean_ohlcv_data(df, self.config.symbol)
         if df.empty:
-            raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year} start={start} end={end} after cleaning.")
+            raise RuntimeError(f"[VALIDATION] OHLCV empty for {self.config.symbol} year={year} start={start_date} end={end_date} after cleaning.")
 
-        self.logger.info("Cleaned OHLCV has %s rows. Saving and uploading to S3...", len(df))
+        logger.info("Cleaned OHLCV has %s rows. Saving and uploading to S3...", len(df))
         self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
 
         local_path = self.config.local_output.with_name(
             f"{self.config.local_output.stem}_{self.config.symbol}_{year}_ohlcv.parquet"
         )
         df.to_parquet(local_path, index=False)
-        self.s3.upload(local_path, key)
-        self.logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_bucket, key)
+        self.s3.upload(local_path, processed_key)
+        logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_bucket, processed_key)
 
     def run(self) -> None:
-        self.validate_symbol(self.config.symbol)
+        logger.info("Starting OHLCV ingestion for %s (years %s-%s)...", self.config.symbol, self.config.start_year, self.config.end_year)
+
         if self.config.start_year > self.config.end_year:
             raise ValueError("Start year cannot be after end year.")
 
-        years_to_process, keys = self.prepare_year_prefixes()
-        if not keys:
-            self.logger.info("All OHLCV data already exists in S3. Nothing to ingest.")
+        years_to_process, processed_keys = self.prepare_year_prefixes()
+        if not processed_keys:
+            logger.info("All OHLCV data already exists in S3. Nothing to ingest.")
             return
 
-        self.logger.info("Need to ingest OHLCV data for %s year(s).", len(keys))
+        logger.info("Need to ingest OHLCV data for %s year(s).", len(processed_keys))
 
         daily_df = self.fetch_raw_data()
         earliest = daily_df["date"].min().date()
         latest = daily_df["date"].max().date()
-        self.logger.info("Available daily OHLCV date range: %s to %s", earliest, latest)
+        logger.info("Available daily OHLCV date range: %s to %s", earliest, latest)
 
-        for year, key in zip(years_to_process, keys):
+        for year, key in zip(years_to_process, processed_keys):
             self.ingest_year(year, key, daily_df, earliest, latest)
 
-        self.logger.info("OHLCV ingestion complete.")
+        logger.info("Raw to processed ingestion pipeline for OHLCV completed.")
 
 
 class NewsIngestor:
@@ -216,53 +244,46 @@ class NewsIngestor:
       - Upload clean + clean+relevance to S3
     """
 
-    logger = logging.getLogger(__name__)
-
     def __init__(
         self,
         config: IngestConfig,
         s3_client_factory: Callable[[str], S3Client] = S3Client,
-        scorer: Optional[RelevanceScorer] = None,
+        # scorer: Optional[RelevanceScorer] = None,
     ):
         self.config = config
         self.s3 = s3_client_factory(config.s3_bucket)
-        self.scorer = scorer or RelevanceScorer()
+        # self.scorer = scorer or RelevanceScorer()
 
     @staticmethod
-    def _s3_clean_key(prefix: str, symbol: str, year: int) -> str:
-        return f"{prefix}/{symbol}/{year}/news_clean.parquet"
-
-    @staticmethod
-    def _s3_rel_key(prefix: str, symbol: str, year: int) -> str:
-        return f"{prefix}/{symbol}/{year}/news_rel.parquet"
+    def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
+        # e.g., processesd/ohlcv/TCS/2023/news_processed.parquet
+        return f"{prefix}/{symbol}/{year}/{processed_filename}"
     
     @staticmethod
-    def _raw_s3_object_key(prefix: str, symbol: str) -> str:
-        return f"{prefix}/{symbol}/news.parquet"
+    def _raw_s3_object_key(prefix: str, symbol: str, raw_filename: str) -> str:
+        # e.g., raw/ohlcv/TCS/news_raw.parquet
+        return f"{prefix}/{symbol}/{raw_filename}"
 
-    def prepare_year_prefixes(self) -> Tuple[List[int], List[str], List[str]]:
+    def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        clean_keys = [self._s3_clean_key(self.config.news_clean_prefix, self.config.symbol, y) for y in years]
-        rel_keys = [self._s3_rel_key(self.config.news_rel_prefix, self.config.symbol, y) for y in years]
+        processed_keys = [self._processed_s3_object_key(self.config.news_processed_prefix, self.config.symbol, y, self.config.news_processed_filename) for y in years]
 
         remaining_years: List[int] = []
-        remaining_clean: List[str] = []
-        remaining_rel: List[str] = []
+        remaining_processed: List[str] = []
 
-        for y, ck, rk in zip(years, clean_keys, rel_keys):
+        for y, ck in zip(years, processed_keys):
             # If relevance layer exists, consider year done
-            if self.s3.exists(rk):
-                self.logger.info("NEWS+REL exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, rk)
+            if self.s3.exists(ck):
+                logger.info("NEWS exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, ck)
             else:
                 remaining_years.append(y)
-                remaining_clean.append(ck)
-                remaining_rel.append(rk)
+                remaining_processed.append(ck)
 
-        return remaining_years, remaining_clean, remaining_rel
+        return remaining_years, remaining_processed
     
     def fetch_raw_data(self) -> pd.DataFrame:
-        raw_key = self._raw_s3_object_key(self.config.news_raw_prefix, self.config.symbol)
-        self.logger.info("Reading RAW news from s3://%s/%s", self.config.s3_bucket, raw_key)
+        raw_key = self._raw_s3_object_key(self.config.news_raw_prefix, self.config.symbol, self.config.news_raw_filename)
+        logger.info("Reading RAW news from s3://%s/%s", self.config.s3_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
@@ -272,81 +293,328 @@ class NewsIngestor:
             self.s3.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
-            self.logger.info("Raw rows: %d", len(raw_df))
+            logger.info("Raw rows: %d", len(raw_df))
 
             return raw_df
 
-    def ingest_year(self, year: int, clean_key: str, rel_key: str, df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
-        start = _year_start_date(year, earliest)
-        end = _year_end_date(year, latest)
+    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
+        start_date = _year_start_date(year, earliest)
+        end_date = _year_end_date(year, latest)
 
-        self.logger.info("Ingesting NEWS for %s from %s to %s...", self.config.symbol, start, end)
-        # raw = fetch_news_from_provider(self.config.symbol, start, end)
+        logger.info("Ingesting NEWS for %s from %s to %s...", self.config.symbol, start_date, end_date)
+        # raw = fetch_news_from_provider(self.config.symbol, start_date, end_date)
 
-        self.logger.info("Filtering NEWS for year %s: %s to %s...", year, start, end)
-        df = df[(df["date"] >= start) & (df["date"] <= end)]
-        if df.empty:
-            self.logger.warning("No NEWS data for %s after filtering %s → %s", self.config.symbol, start, end)
-            return
+        logger.info("Filtering NEWS for year %s: %s to %s...", year, start_date, end_date)
 
-        self.logger.info("Fetched %s raw news rows. Cleaning...", len(df))
-        news_clean = clean_news_data(df, self.config.symbol, start, end)
-        if news_clean.empty:
-            raise RuntimeError(f"[VALIDATION] NEWS empty for {self.config.symbol} year={year}, {self.config.symbol}, start, end")
-
-        self.logger.info("Cleaned NEWS has %s rows. Saving and uploading to S3...", len(news_clean))
-
-        self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
-
-        local_clean = self.config.local_output.with_name(
-            f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_clean.parquet"
-        )
-        news_clean.to_parquet(local_clean, index=False)
-        self.s3.upload(local_clean, clean_key)
-        self.logger.info("Uploaded NEWS clean to s3://%s/%s", self.config.s3_bucket, clean_key)
-
-        # relevance scoring
-        if news_clean.empty:
-            news_rel = news_clean.copy()
-            news_rel["relevance_score"] = pd.Series(dtype="float32")
+        # Filter by date window (year)
+        if "date" in raw_df.columns:
+            tmp_dt = pd.to_datetime(raw_df["date"], errors="coerce", utc=True)
+        elif "published_at" in raw_df.columns:
+            tmp_dt = pd.to_datetime(raw_df["published_at"], errors="coerce", utc=True)
         else:
-            scores = self.scorer.score(
-                symbol=self.config.symbol,
-                headlines=news_clean["headline"].astype(str).tolist(),
-                summaries=news_clean["summary"].astype(str).tolist()
-                if "summary" in news_clean.columns
-                else None,
-            )
-            news_rel = news_clean.copy()
-            news_rel["relevance_score"] = scores.astype("float32")
+            # desiquant news uses 'date' string column in raw dumps; if parquet kept it as 'date', above handles it.
+            tmp_dt = pd.to_datetime(raw_df.get("date"), errors="coerce", utc=True)
 
-        local_rel = self.config.local_output.with_name(
-            f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_rel.parquet"
-        )
-        news_rel.to_parquet(local_rel, index=False)
-        self.s3.upload(local_rel, rel_key)
-        self.logger.info("Uploaded NEWS+REL to s3://%s/%s", self.config.s3_bucket, rel_key)
+        raw_df = raw_df.assign(_dt=tmp_dt).dropna(subset=["_dt"])
+        raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+
+        news_clean = clean_desiq_news_data(raw_df, symbol=self.config.symbol)
+
+        # write local -> upload (keep same pattern you use elsewhere)
+        out_dir = self.config.local_output / "processed" / "news" / self.config.symbol / str(year)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / self.config.news_processed_filename
+        news_clean.to_parquet(out_path, index=False)
+
+        self.s3.upload(out_path, processed_key)
+        logger.info("Uploaded processed news to s3://%s/%s", self.config.s3_bucket, processed_key)
+
+        # df = raw_df[(raw_df["date"] >= start_date) & (raw_df["date"] <= end_date)]
+        # if df.empty:
+        #     logger.warning("No NEWS data for %s after filtering %s → %s", self.config.symbol, start_date, end_date)
+        #     return
+
+        # logger.info("Fetched %s raw news rows. Cleaning...", len(df))
+        # news_clean = clean_news_data(df, self.config.symbol, start_date, end_date)
+        # if news_clean.empty:
+        #     raise RuntimeError(f"[VALIDATION] NEWS empty for {self.config.symbol} year={year}, {self.config.symbol}, start, end")
+
+        # logger.info("Cleaned NEWS has %s rows. Saving and uploading to S3...", len(news_clean))
+
+        # self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
+
+        # local_clean = self.config.local_output.with_name(
+        #     f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_clean.parquet"
+        # )
+        # news_clean.to_parquet(local_clean, index=False)
+        # self.s3.upload(local_clean, clean_key)
+        # logger.info("Uploaded NEWS clean to s3://%s/%s", self.config.s3_bucket, clean_key)
+
+        # # relevance scoring
+        # if news_clean.empty:
+        #     news_rel = news_clean.copy()
+        #     news_rel["relevance_score"] = pd.Series(dtype="float32")
+        # else:
+        #     scores = self.scorer.score(
+        #         symbol=self.config.symbol,
+        #         headlines=news_clean["headline"].astype(str).tolist(),
+        #         summaries=news_clean["summary"].astype(str).tolist()
+        #         if "summary" in news_clean.columns
+        #         else None,
+        #     )
+        #     news_rel = news_clean.copy()
+        #     news_rel["relevance_score"] = scores.astype("float32")
+
+        # local_rel = self.config.local_output.with_name(
+        #     f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_rel.parquet"
+        # )
+        # news_rel.to_parquet(local_rel, index=False)
+        # self.s3.upload(local_rel, rel_key)
+        # logger.info("Uploaded NEWS+REL to s3://%s/%s", self.config.s3_bucket, rel_key)
 
     def run(self) -> None:
+        logger.info("Starting News ingestion for %s (years %s-%s)...", self.config.symbol, self.config.start_year, self.config.end_year)
+
         if self.config.start_year > self.config.end_year:
             raise ValueError("Start year cannot be after end year.")
 
-        years, clean_keys, rel_keys = self.prepare_year_prefixes()
-        if not rel_keys:
-            self.logger.info("All NEWS+REL data already exists in S3. Nothing to ingest.")
+        years, processed_keys = self.prepare_year_prefixes()
+        if not processed_keys:
+            logger.info("All NEWS data already exists in S3. Nothing to ingest.")
             return
 
-        self.logger.info("Need to ingest NEWS+REL data for %s year(s).", len(rel_keys))
+        logger.info("Need to ingest NEWS data for %s year(s).", len(processed_keys))
 
         raw_df = self.fetch_raw_data()
         earliest = raw_df["date"].min().date()
         latest = raw_df["date"].max().date()
-        self.logger.info("Available raw NEWS date range: %s to %s", earliest, latest)
+        logger.info("Available raw NEWS date range: %s to %s", earliest, latest)
 
-        for y, ck, rk in zip(years, clean_keys, rel_keys):
-            self.ingest_year(y, ck, rk, raw_df,earliest, latest)
+        for y, pk in zip(years, processed_keys):
+            self.ingest_year(y, pk, raw_df, earliest, latest)
 
-        self.logger.info("News ingestion complete.")
+        logger.info("Raw to processed ingestion pipeline for News completed.")
+
+
+class CorporateAnnouncementsIngestor:
+    def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
+        self.config = config
+        self.s3 = s3_client_factory(config.s3_bucket)
+
+    @staticmethod
+    def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
+        # e.g., processed/corporate_announcements/TCS/2023/corporate_announcements_processed.parquet
+        return f"{prefix}/{symbol}/{year}/{processed_filename}"
+    
+    @staticmethod
+    def _raw_s3_object_key(prefix: str, symbol: str, raw_filename: str) -> str:
+        # e.g., raw/desiquant/corporate_announcements/TCS/corporate_announcements_raw.parquet
+        return f"{prefix}/{symbol}/{raw_filename}"
+
+    def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
+        years = list(range(self.config.start_year, self.config.end_year + 1))
+        processed_keys = [self._processed_s3_object_key(self.config.announcements_processed_prefix, self.config.symbol, y, self.config.announcements_processed_filename) for y in years]
+
+        remaining_years: List[int] = []
+        remaining_processed: List[str] = []
+        for y, key in zip(years, processed_keys):
+            if self.s3.exists(key):
+                logger.info("Corporate Announcements exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+            else:
+                remaining_years.append(y)
+                remaining_processed.append(key)
+
+        return remaining_years, remaining_processed
+
+    def fetch_raw_data(self) -> pd.DataFrame:
+        raw_key = self._raw_s3_object_key(self.config.announcements_raw_prefix, self.config.symbol, self.config.announcements_raw_filename)
+        logger.info("Reading RAW corporate announcements from s3://%s/%s", self.config.s3_bucket, raw_key)
+
+        with tempfile.TemporaryDirectory() as td:
+            raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
+            if not self.s3.exists(raw_key):
+                raise FileNotFoundError(f"RAW corporate announcements not found at s3://{self.config.s3_bucket}/{raw_key}")
+
+            self.s3.download(raw_key, raw_local)
+            raw_df = pd.read_parquet(raw_local)
+
+            logger.info("Raw rows: %d", len(raw_df))
+
+            return raw_df
+
+    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
+        start_date = _year_start_date(year, earliest)
+        end_date = _year_end_date(year, latest)
+
+        logger.info("Ingesting Corporate Announcements for year %s: %s to %s", year, start_date, end_date)
+
+        logger.info("Filtering Corporate Announcements for year %s: %s to %s...", year, start_date, end_date)
+
+        if "NEWS_DT" in raw_df.columns:
+            dtcol = pd.to_datetime(raw_df["NEWS_DT"], errors="coerce", utc=True)
+            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
+            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+
+        # raw_key = f"{self.config.announcements_raw_prefix}/{self.config.symbol}/{year}/{self.config.announcements_raw_filename}"
+        # processed_key = f"{self.config.announcements_processed_prefix}/{self.config.symbol}/{year}/{self.config.announcements_processed_filename}"
+
+        # if self.s3.object_exists(processed_key):
+        #     logger.info("Processed corp announcements exists, skipping: s3://%s/%s", self.cfg.s3_bucket, processed_key)
+        #     return
+
+        # if not self.s3.object_exists(raw_key):
+        #     logger.warning("Raw corp announcements not found, skipping: s3://%s/%s", self.cfg.s3_bucket, raw_key)
+        #     return
+
+        # raw_df = _read_parquet_from_s3(self.s3.s3_client, self.cfg.s3_bucket, raw_key)
+
+        # Filter by year if NEWS_DT exists
+        if "NEWS_DT" in raw_df.columns:
+            dtcol = pd.to_datetime(raw_df["NEWS_DT"], errors="coerce", utc=True)
+            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
+            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+
+        clean_df = clean_desiq_corporate_announcements(raw_df, symbol=self.config.symbol)
+
+        out_dir = self.config.local_output / "processed" / "corporate_announcements" / self.config.symbol / str(year)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / self.config.announcements_processed_filename
+        clean_df.to_parquet(out_path, index=False)
+
+        self.s3.upload(out_path, processed_key)
+        logger.info("Uploaded processed corp announcements to s3://%s/%s", self.config.s3_bucket, processed_key)
+
+    def run(self) -> None:
+        logger.info("Starting Corporate Announcements ingestion for %s (%s-%s)", self.config.symbol, self.config.start_year, self.config.end_year)
+
+        if self.config.start_year > self.config.end_year:
+            raise ValueError("Start year cannot be after end year.")
+
+        years, processed_keys = self.prepare_year_prefixes()
+        if not processed_keys:
+            logger.info("All Corporate Announcements data already exists in S3. Nothing to ingest.")
+            return
+
+        logger.info("Need to ingest Corporate Announcements data for %s year(s).", len(processed_keys))
+
+        raw_df = self.fetch_raw_data()
+        earliest = raw_df["date"].min().date()
+        latest = raw_df["date"].max().date()
+        logger.info("Available raw Corporate Announcements date range: %s to %s", earliest, latest)
+
+        for y, pk in zip(years, processed_keys):
+            self.ingest_year(y, pk, raw_df, earliest, latest)
+
+        logger.info("Raw to processed ingestion pipeline for Corporate Announcements completed.")
+
+
+class FinancialResultsIngestor:
+    def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
+        self.config = config
+        self.s3 = s3_client_factory(config.s3_bucket)
+
+    @staticmethod
+    def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
+        # e.g., processed/financial_results/TCS/2023/financial_results_processed.parquet
+        return f"{prefix}/{symbol}/{year}/{processed_filename}"
+    
+    @staticmethod
+    def _raw_s3_object_key(prefix: str, symbol: str, raw_filename: str) -> str:
+        # e.g., raw/desiquant/financial_results/TCS/financial_results_raw.parquet
+        return f"{prefix}/{symbol}/{raw_filename}"
+
+    def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
+        years = list(range(self.config.start_year, self.config.end_year + 1))
+        processed_keys = [self._processed_s3_object_key(self.config.results_raw_prefix, self.config.symbol, y, self.config.results_processed_filename) for y in years]
+
+        remaining_years: List[int] = []
+        remaining_processed: List[str] = []
+        for y, key in zip(years, processed_keys):
+            if self.s3.exists(key):
+                logger.info("Financial Results exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+            else:
+                remaining_years.append(y)
+                remaining_processed.append(key)
+
+        return remaining_years, remaining_processed
+
+    def fetch_raw_data(self) -> pd.DataFrame:
+        raw_key = self._raw_s3_object_key(self.config.results_raw_prefix, self.config.symbol, self.config.results_raw_filename)
+        logger.info("Reading RAW financial results from s3://%s/%s", self.config.s3_bucket, raw_key)
+
+        with tempfile.TemporaryDirectory() as td:
+            raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
+            if not self.s3.exists(raw_key):
+                raise FileNotFoundError(f"RAW financial results not found at s3://{self.config.s3_bucket}/{raw_key}")
+
+            self.s3.download(raw_key, raw_local)
+            raw_df = pd.read_parquet(raw_local)
+
+            logger.info("Raw rows: %d", len(raw_df))
+
+            return raw_df
+
+    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
+        start_date = _year_start_date(year, earliest)
+        end_date = _year_end_date(year, latest)
+
+        logger.info("Ingesting Financial Results for year %s: %s to %s", year, start_date, end_date)
+
+        logger.info("Filtering Financial Results for year %s: %s to %s...", year, start_date, end_date)
+
+
+        # raw_key = f"{RAW_FIN_RESULTS_PREFIX}/{self.cfg.symbol}/{year}/{RAW_FIN_RESULTS_FILENAME}"
+        # processed_key = f"{PROCESSED_FIN_RESULTS_PREFIX}/{self.cfg.symbol}/{year}/{PROCESSED_FIN_RESULTS_FILENAME}"
+
+        # if self.s3.object_exists(processed_key):
+        #     logger.info("Processed financial results exists, skipping: s3://%s/%s", self.cfg.s3_bucket, processed_key)
+        #     return
+
+        # if not self.s3.object_exists(raw_key):
+        #     logger.warning("Raw financial results not found, skipping: s3://%s/%s", self.cfg.s3_bucket, raw_key)
+        #     return
+
+        # raw_df = _read_parquet_from_s3(self.s3.s3_client, self.cfg.s3_bucket, raw_key)
+
+        # Filter by year using filingDate (best signal)
+        if "filingDate" in raw_df.columns:
+            dtcol = pd.to_datetime(raw_df["filingDate"], errors="coerce", utc=True)
+            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
+            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+
+        clean_df = clean_desiq_financial_results(raw_df, symbol=self.config.symbol)
+
+        out_dir = self.config.local_output / "processed" / "financial_results" / self.config.symbol / str(year)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / self.config.results_processed_filename
+        clean_df.to_parquet(out_path, index=False)
+
+        self.s3.upload(out_path, processed_key)
+        logger.info("Uploaded processed financial results to s3://%s/%s", self.config.s3_bucket, processed_key)
+
+    def run(self) -> None:
+        logger.info("Starting Financial Results ingestion for %s (%s-%s)", self.config.symbol, self.config.start_year, self.config.end_year)
+
+        if self.config.start_year > self.config.end_year:
+            raise ValueError("Start year cannot be after end year.")
+
+        years, processed_keys = self.prepare_year_prefixes()
+        if not processed_keys:
+            logger.info("All Financial Results data already exists in S3. Nothing to ingest.")
+            return
+
+        logger.info("Need to ingest Financial Results data for %s year(s).", len(processed_keys))
+
+        raw_df = self.fetch_raw_data()
+        earliest = raw_df["date"].min().date()
+        latest = raw_df["date"].max().date()
+        logger.info("Available raw Financial Results date range: %s to %s", earliest, latest)
+
+        for y, pk in zip(years, processed_keys):
+            self.ingest_year(y, pk, raw_df, earliest, latest)
+
+        logger.info("Raw to processed ingestion pipeline for Financial Results completed.")
+
 
 
 class MultiModalIngestor:
@@ -355,14 +623,12 @@ class MultiModalIngestor:
     with the same CLI inputs (symbol, start, end).
     """
 
-    logger = logging.getLogger(__name__)
-
     def __init__(self, config: IngestConfig):
         self.config = config
 
-    def run(self, run_ohlcv: bool = True, run_news: bool = True, log_level: Optional[str] = None) -> None:
+    def run(self, run_ohlcv: bool = True, run_news: bool = True, run_corp_ann: bool = True, run_fin_results: bool = True, log_level: Optional[str] = None) -> None:
         setup_logging(log_level)
-        self.logger.info(
+        logger.info(
             "Starting multi-modal ingestion for %s (years %s-%s) with log level %s",
             self.config.symbol,
             self.config.start_year,
@@ -378,7 +644,13 @@ class MultiModalIngestor:
         if run_news:
             NewsIngestor(self.config).run()
 
-        self.logger.info("Multi-modal ingestion finished. (OHLCV=%s, NEWS=%s)", run_ohlcv, run_news)
+        if run_corp_ann:
+            CorporateAnnouncementsIngestor(self.config).run()
+
+        if run_fin_results:
+            FinancialResultsIngestor(self.config).run()
+
+        logger.info("Multi-modal ingestion finished. (OHLCV=%s, NEWS=%s)", run_ohlcv, run_news)
 
 
 # ---- CLI ----
@@ -390,7 +662,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--local-output", type=str, default="/tmp/ingest.parquet", help="Local temp parquet stem")
     parser.add_argument("--s3-bucket", type=str, default=storage_constants.S3_BUCKET, help="S3 bucket name")
     parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
-    parser.add_argument("--news-only", action="store_true", help="Only ingest news + relevance.")
+    parser.add_argument("--news-only", action="store_true", help="Only ingest news.")
+    parser.add_argument("--corporate-announcements-only", action="store_true", help="Only ingest Corporate Announcements.")
+    parser.add_argument("--financial-results-only", action="store_true", help="Only ingest Financial Results.")
     parser.add_argument(
         "--log-level",
         type=str,
@@ -410,10 +684,24 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     run_ohlcv = True
     run_news = True
+    run_corp_ann = True
+    run_fin_results = True
     if args.ohlcv_only:
         run_news = False
+        run_corp_ann = False
+        run_fin_results = False
     if args.news_only:
         run_ohlcv = False
+        run_corp_ann = False
+        run_fin_results = False
+    if args.corporate_announcements_only:
+        run_ohlcv = False
+        run_news = False
+        run_fin_results = False
+    if args.financial_results_only:
+        run_ohlcv = False
+        run_news = False
+        run_corp_ann = False
 
     config = IngestConfig(
         symbol=symbol,
@@ -423,7 +711,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         s3_bucket=args.s3_bucket,
     )
 
-    MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news, log_level=args.log_level)
+    MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news, run_corp_ann=run_corp_ann, run_fin_results=run_fin_results, log_level=args.log_level)
 
 
 if __name__ == "__main__":
