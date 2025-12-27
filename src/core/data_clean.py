@@ -230,58 +230,230 @@ def clean_desiq_news_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return out
 
 
-def clean_desiq_corporate_announcements(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """
-    Desiquant corporate announcements raw -> canonical announcements schema.
+# def clean_desiq_corporate_announcements(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+#     """
+#     Desiquant corporate announcements raw -> canonical announcements schema.
 
-    Your CSV looks like it has:
-      NEWS_DT, HEADLINE, NEWSSUB, CATEGORYNAME, SUBCATNAME, ATTACHMENTNAME, ...
-    Output cols:
-      date, symbol, headline, details, category, subcategory, attachment_name, attachment_link, relevance_score
+#     Your CSV looks like it has:
+#       NEWS_DT, HEADLINE, NEWSSUB, CATEGORYNAME, SUBCATNAME, ATTACHMENTNAME, ...
+#     Output cols:
+#       date, symbol, headline, details, category, subcategory, attachment_name, attachment_link, relevance_score
+#     """
+#     if df.empty:
+#         return df
+
+#     d = df.copy()
+
+#     # Date
+#     if "news_dt" not in d.columns:
+#         raise ValueError("Corporate announcements missing column: news_dt")
+#     d["published_at"] = pd.to_datetime(d["news_dt"], errors="coerce", utc=True)
+#     d["date"] = d["published_at"].dt.date
+
+#     # Text fields
+#     d["headline"] = d["HEADLINE"].astype(str).str.strip() if "HEADLINE" in d.columns else pd.NA
+#     d["details"] = d["NEWSSUB"] if "NEWSSUB" in d.columns else pd.NA
+
+#     d["category"] = d["CATEGORYNAME"] if "CATEGORYNAME" in d.columns else pd.NA
+#     d["subcategory"] = d["SUBCATNAME"] if "SUBCATNAME" in d.columns else pd.NA
+
+#     d["attachment_name"] = d["ATTACHMENTNAME"] if "ATTACHMENTNAME" in d.columns else pd.NA
+#     d["attachment_link"] = d["ATTACHMENTLINK"] if "ATTACHMENTLINK" in d.columns else pd.NA
+
+#     d["symbol"] = symbol
+#     d["relevance_score"] = 1.0  # placeholder
+
+#     out = d[
+#         [
+#             "date",
+#             "symbol",
+#             "headline",
+#             "details",
+#             "category",
+#             "subcategory",
+#             "published_at",
+#             "attachment_name",
+#             "attachment_link",
+#             "relevance_score",
+#         ]
+#     ].copy()
+
+#     out.dropna(subset=["headline", "published_at"], inplace=True)
+#     out.drop_duplicates(subset=["symbol", "headline", "published_at"], inplace=True)
+#     out.sort_values(["symbol", "date", "published_at"], inplace=True)
+#     out.reset_index(drop=True, inplace=True)
+#     return out
+
+
+def clean_desiq_corporate_announcements(
+    df: pd.DataFrame,
+    symbol: str,
+    source: str | None = None,   # "bse" | "nse" | None(auto-detect)
+) -> pd.DataFrame:
     """
-    if df.empty:
+    Clean DesiQ corporate announcements data (BSE or NSE) into a single canonical schema.
+
+    Canonical output columns:
+      date, symbol, exchange, published_at, headline, subject, details,
+      category, subcategory, announcement_type, url,
+      attachment_url, attachment_name, raw_id
+
+    Notes:
+    - BSE feed typically has: NEWSID, HEADLINE/NEWSSUB, DT_TM, CATEGORYNAME, SUBCATNAME, NSURL, ATTACHMENTNAME...
+    - NSE feed typically has: desc, sort_date/an_dt/dt/exchdisstime, attchmntFile, attchmntText, smIndustry, seq_id...
+    """
+    if df is None or df.empty:
+        logger.info("Received empty corporate announcements DataFrame for %s; skipping clean", symbol)
         return df
 
-    d = df.copy()
+    df = df.copy()
+    df.rename(columns={c: c.upper() for c in df.columns}, inplace=True)
+    cols = set(df.columns)
 
-    # Date
-    if "NEWS_DT" not in d.columns:
-        raise ValueError("Corporate announcements missing column: NEWS_DT")
-    d["published_at"] = pd.to_datetime(d["NEWS_DT"], errors="coerce", utc=True)
-    d["date"] = d["published_at"].dt.date
+    # --- Auto-detect source if not provided ---
+    if source is None:
+        if {"NEWSID", "SCRIP_CD", "DT_TM"}.intersection(cols) and ("CATEGORYNAME" in cols or "SUBCATNAME" in cols):
+            source = "bse"
+        # elif {"attchmntFile", "attchmntText", "sm_isin", "seq_id"}.intersection(cols) or "smIndustry" in cols:
+        elif {"ATTACHMNTFILE", "ATTCHMNTTEXT", "SM_ISIN", "SEQ_ID"}.intersection(cols) or "SMINDUSTRY" in cols:
+            source = "nse"
+        else:
+            raise ValueError(
+                f"Unable to auto-detect corporate announcements source from columns: {sorted(cols)}"
+            )
 
-    # Text fields
-    d["headline"] = d["HEADLINE"].astype(str).str.strip() if "HEADLINE" in d.columns else pd.NA
-    d["details"] = d["NEWSSUB"] if "NEWSSUB" in d.columns else pd.NA
+    source = source.lower().strip()
+    if source not in {"bse", "nse"}:
+        raise ValueError("source must be one of: 'bse', 'nse', or None(auto-detect)")
 
-    d["category"] = d["CATEGORYNAME"] if "CATEGORYNAME" in d.columns else pd.NA
-    d["subcategory"] = d["SUBCATNAME"] if "SUBCATNAME" in d.columns else pd.NA
+    # --- Build canonical frame depending on source ---
+    if source == "bse":
+        exchange = "BSE"
 
-    d["attachment_name"] = d["ATTACHMENTNAME"] if "ATTACHMENTNAME" in d.columns else pd.NA
-    d["attachment_link"] = d["ATTACHMENTLINK"] if "ATTACHMENTLINK" in d.columns else pd.NA
+        # Published timestamp
+        published_at = pd.to_datetime(df.get("DT_TM"), errors="coerce")
+        if published_at.isna().all() and "NEWS_DT" in df.columns:
+            published_at = pd.to_datetime(df.get("NEWS_DT"), errors="coerce")
 
-    d["symbol"] = symbol
-    d["relevance_score"] = 1.0  # placeholder
+        out = pd.DataFrame(
+            {
+                "published_at": published_at,
+                "headline": df.get("HEADLINE"),
+                "subject": df.get("NEWSSUB"),
+                "details": df.get("MORE"),
+                "category": df.get("CATEGORYNAME"),
+                "subcategory": df.get("SUBCATNAME"),
+                "announcement_type": df.get("ANNOUNCEMENT_TYPE"),
+                "url": df.get("NSURL"),
+                "attachment_url": df.get("NSURL"),  # BSE often uses same URL for attachment/doc
+                "attachment_name": df.get("ATTACHMENTNAME"),
+                "raw_id": df.get("NEWSID"),
+            }
+        )
 
-    out = d[
+    else:
+        exchange = "NSE"
+
+        # Choose best timestamp column available
+        ts_col = None
+        # for c in ["sort_date", "exchdisstime", "an_dt", "dt"]:
+        for c in ["SORT_DATE", "EXCHDISSTIME", "AN_DT", "DT"]:
+            if c in df.columns:
+                ts_col = c
+                break
+        published_at = pd.to_datetime(df.get(ts_col), errors="coerce") if ts_col else pd.to_datetime(pd.NA)
+
+        # NSE "desc" is usually the short headline; "attchmntText" is the longer text.
+        # headline = df.get("desc")
+        # details = df.get("attchmntText")
+        headline = df.get("DESC")
+        details = df.get("ATTCHMNTTEXT")
+
+        # out = pd.DataFrame(
+        #     {
+        #         "published_at": published_at,
+        #         "headline": headline,
+        #         "subject": pd.NA,  # not present in NSE feed
+        #         "details": details,
+        #         "category": df.get("smIndustry"),
+        #         "subcategory": pd.NA,
+        #         "announcement_type": pd.NA,
+        #         "url": df.get("attchmntFile"),       # often the document URL
+        #         "attachment_url": df.get("attchmntFile"),
+        #         "attachment_name": pd.NA,            # no filename field; keep NA
+        #         "raw_id": df.get("seq_id"),
+        #     }
+        # )
+        out = pd.DataFrame(
+            {
+                "published_at": published_at,
+                "headline": headline,
+                "subject": pd.NA,  # not present in NSE feed
+                "details": details,
+                "category": df.get("SMINDUSTRY"),
+                "subcategory": pd.NA,
+                "announcement_type": pd.NA,
+                "url": df.get("ATTCHMNTFILE"),       # often the document URL
+                "attachment_url": df.get("ATTCHMNTFILE"),
+                "attachment_name": pd.NA,            # no filename field; keep NA
+                "raw_id": df.get("SEQ_ID"),
+            }
+        )
+
+    # --- Add shared columns ---
+    out.insert(0, "exchange", exchange)
+    out.insert(0, "symbol", symbol)
+
+    # Derive date
+    out["published_at"] = pd.to_datetime(out["published_at"], errors="coerce")
+    out["date"] = out["published_at"].dt.date
+
+    # Ensure optional text fields exist and are strings/NA-friendly
+    for c in ["headline", "subject", "details", "category", "subcategory", "announcement_type", "url", "attachment_url", "attachment_name"]:
+        if c not in out.columns:
+            out[c] = pd.NA
+
+    # Drop unusable rows (no timestamp AND no headline/details)
+    before = len(out)
+    out.dropna(subset=["published_at"], inplace=True)
+    logger.debug("Dropped %s corporate announcement rows missing published_at", before - len(out))
+
+    # Deduplicate: NSE can repeat same desc+timestamp; BSE can repeat NEWSID etc.
+    before = len(out)
+    out.drop_duplicates(subset=["symbol", "exchange", "published_at", "headline"], inplace=True)
+    logger.debug("Removed %s duplicate corporate announcement rows", before - len(out))
+
+    # Sort + final column order
+    out.sort_values(["symbol", "exchange", "published_at"], inplace=True)
+    out.reset_index(drop=True, inplace=True)
+
+    out = out[
         [
             "date",
             "symbol",
+            "exchange",
+            "published_at",
             "headline",
+            "subject",
             "details",
             "category",
             "subcategory",
-            "published_at",
+            "announcement_type",
+            "url",
+            "attachment_url",
             "attachment_name",
-            "attachment_link",
-            "relevance_score",
+            "raw_id",
         ]
-    ].copy()
+    ]
 
-    out.dropna(subset=["headline", "published_at"], inplace=True)
-    out.drop_duplicates(subset=["symbol", "headline", "published_at"], inplace=True)
-    out.sort_values(["symbol", "date", "published_at"], inplace=True)
-    out.reset_index(drop=True, inplace=True)
+    logger.info(
+        "Completed corporate announcements clean (%s) for %s with %s rows (%s -> %s)",
+        exchange,
+        symbol,
+        len(out),
+        out["date"].min(),
+        out["date"].max(),
+    )
     return out
 
 
@@ -289,7 +461,7 @@ def clean_desiq_financial_results(df: pd.DataFrame, symbol: str) -> pd.DataFrame
     """
     Desiquant financial results raw -> canonical financial-results events schema.
 
-    Your CSV has many columns; we normalize to:
+    CSV has many columns; we normalize to:
       filing_date, period_end, fiscal_year, fiscal_quarter, res_type, con_noncon, net_sales, net_profit, eps, text_blob
     Output cols:
       date, symbol, filing_date, period_end, fiscal_year, fiscal_quarter,
@@ -301,11 +473,11 @@ def clean_desiq_financial_results(df: pd.DataFrame, symbol: str) -> pd.DataFrame
     d = df.copy()
 
     # Common date columns (observed in these dumps)
-    filing_col = "filingDate" if "filingDate" in d.columns else None
+    filing_col = "filingdate" if "filingdate" in d.columns else None
     period_col = "periodEndDT" if "periodEndDT" in d.columns else None
 
     if not filing_col:
-        raise ValueError("Financial results missing column: filingDate")
+        raise ValueError("Financial results missing column: filingdate")
 
     d["filing_date"] = pd.to_datetime(d[filing_col], errors="coerce", utc=True)
     d["date"] = d["filing_date"].dt.date
