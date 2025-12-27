@@ -22,10 +22,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 # Local imports
 import src.constants.symbols as symbols_constants
 import src.constants.storage as storage_constants
+import src.constants.desiquant as desiquant_constants
 from src.config import setup_logging
 from src.core.data_transformations import aggregate_intraday_to_daily
 from src.io.connections import S3Connection
-from src.nlp.relevance_scoring import RelevanceScorer
+# from src.nlp.relevance_scoring import RelevanceScorer
 from src.core.data_clean import (
     clean_ohlcv_data, 
     clean_news_data,
@@ -70,7 +71,7 @@ class IngestConfig:
     results_processed_filename: str = storage_constants.PROCESSED_FIN_RESULTS_FILENAME
     announcements_processed_filename: str = storage_constants.PROCESSED_CORP_ANN_FILENAME
 
-def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
+def _year_end_date(year: int, latest: dt.date) -> dt.date:
     """
     Use T-2 business days for the current year, otherwise December 31st.
     """
@@ -79,12 +80,12 @@ def _year_end_date(year: int, latest: dt.date) -> pd.Timestamp:
         logger.debug(
             "Adjusted end date for year %s from %s to earliest allowed %s", year, end_date, latest
         )
-        return pd.to_datetime(latest)
+        return latest
     logger.debug("Computed year-end date for %s: %s", year, end_date)
-    return pd.to_datetime(end_date)
+    return end_date
 
 
-def _year_start_date(year: int, earliest: dt.date) -> pd.Timestamp:
+def _year_start_date(year: int, earliest: dt.date) -> dt.date:
     """
     Use January 1st of the year, but not before the earliest allowed date.
     """
@@ -93,9 +94,9 @@ def _year_start_date(year: int, earliest: dt.date) -> pd.Timestamp:
         logger.debug(
             "Adjusted start date for year %s from %s to earliest allowed %s", year, start_date, earliest
         )
-        return pd.to_datetime(earliest)
+        return earliest
     logger.debug("Computed year-start date for %s: %s", year, start_date)
-    return pd.to_datetime(start_date)
+    return start_date
 
 
 class S3Client:
@@ -120,7 +121,13 @@ class S3Client:
 
 class OHLCVIngestor:
     """
-    Encapsulates the OHLCV ingestion pipeline.
+    OHLCV ingestion pipeline:
+    1. Check which years need processing (based on processed S3 keys)
+    2. Download raw OHLCV data from S3
+    3. For each year to process:
+       a. Filter raw OHLCV by date range
+       b. Clean OHLCV data
+       c. Upload processed OHLCV to S3
     """
 
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
@@ -164,6 +171,7 @@ class OHLCVIngestor:
                 remaining_years.append(y)
                 remaining_processed.append(key)
 
+        logger.debug("Years pending OHLCV ingestion for %s: %s", self.config.symbol, remaining_years)
         return remaining_years, remaining_processed
     
     def fetch_raw_data(self) -> pd.DataFrame:
@@ -179,6 +187,7 @@ class OHLCVIngestor:
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
+            logger.debug("Raw OHLCV columns for %s: %s", self.config.symbol, raw_df.columns.tolist())
 
             daily_df = aggregate_intraday_to_daily(raw_df)
             logger.info("Daily rows: %d", len(daily_df))
@@ -193,6 +202,7 @@ class OHLCVIngestor:
 
         logger.info("Filtering OHLCV for year %s: %s to %s...", year, start_date, end_date)
         df = raw_df[(raw_df["date"] >= start_date) & (raw_df["date"] <= end_date)]
+        logger.debug("Filtered %s OHLCV rows for %s year %s", len(df), self.config.symbol, year)
         if df.empty:
             logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start_date, end_date)
             return
@@ -207,6 +217,7 @@ class OHLCVIngestor:
         local_path = self.config.local_output.with_name(
             f"{self.config.local_output.stem}_{self.config.symbol}_{year}_ohlcv.parquet"
         )
+        logger.debug("Writing OHLCV parquet to %s", local_path)
         df.to_parquet(local_path, index=False)
         self.s3.upload(local_path, processed_key)
         logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_bucket, processed_key)
@@ -238,10 +249,13 @@ class OHLCVIngestor:
 class NewsIngestor:
     """
     News ingestion pipeline:
-      - Fetch Google News RSS
-      - Clean
-      - Semantic relevance scoring
-      - Upload clean + clean+relevance to S3
+    1. Check which years need processing (based on processed S3 keys)
+    2. Download raw news data from S3
+    3. For each year to process:
+       a. Filter raw news by date range
+       b. Clean news data
+       c. Upload processed news to S3
+    4. (Optional) Apply relevance scoring layer
     """
 
     def __init__(
@@ -279,6 +293,7 @@ class NewsIngestor:
                 remaining_years.append(y)
                 remaining_processed.append(ck)
 
+        logger.debug("Years pending NEWS ingestion for %s: %s", self.config.symbol, remaining_years)
         return remaining_years, remaining_processed
     
     def fetch_raw_data(self) -> pd.DataFrame:
@@ -294,6 +309,7 @@ class NewsIngestor:
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
+            logger.debug("Raw NEWS columns for %s: %s", self.config.symbol, raw_df.columns.tolist())
 
             return raw_df
 
@@ -302,75 +318,24 @@ class NewsIngestor:
         end_date = _year_end_date(year, latest)
 
         logger.info("Ingesting NEWS for %s from %s to %s...", self.config.symbol, start_date, end_date)
-        # raw = fetch_news_from_provider(self.config.symbol, start_date, end_date)
 
         logger.info("Filtering NEWS for year %s: %s to %s...", year, start_date, end_date)
 
-        # Filter by date window (year)
-        if "date" in raw_df.columns:
-            tmp_dt = pd.to_datetime(raw_df["date"], errors="coerce", utc=True)
-        elif "published_at" in raw_df.columns:
-            tmp_dt = pd.to_datetime(raw_df["published_at"], errors="coerce", utc=True)
-        else:
-            # desiquant news uses 'date' string column in raw dumps; if parquet kept it as 'date', above handles it.
-            tmp_dt = pd.to_datetime(raw_df.get("date"), errors="coerce", utc=True)
-
-        raw_df = raw_df.assign(_dt=tmp_dt).dropna(subset=["_dt"])
         raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+        logger.debug("Filtered %d NEWS rows for %s year %s", len(raw_df), self.config.symbol, year)
 
         news_clean = clean_desiq_news_data(raw_df, symbol=self.config.symbol)
+        logger.info("Cleaned NEWS has %s rows for %s year %s", len(news_clean), self.config.symbol, year)
 
         # write local -> upload (keep same pattern you use elsewhere)
         out_dir = self.config.local_output / "processed" / "news" / self.config.symbol / str(year)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / self.config.news_processed_filename
+        logger.debug("Writing cleaned NEWS parquet to %s", out_path)
         news_clean.to_parquet(out_path, index=False)
 
         self.s3.upload(out_path, processed_key)
         logger.info("Uploaded processed news to s3://%s/%s", self.config.s3_bucket, processed_key)
-
-        # df = raw_df[(raw_df["date"] >= start_date) & (raw_df["date"] <= end_date)]
-        # if df.empty:
-        #     logger.warning("No NEWS data for %s after filtering %s → %s", self.config.symbol, start_date, end_date)
-        #     return
-
-        # logger.info("Fetched %s raw news rows. Cleaning...", len(df))
-        # news_clean = clean_news_data(df, self.config.symbol, start_date, end_date)
-        # if news_clean.empty:
-        #     raise RuntimeError(f"[VALIDATION] NEWS empty for {self.config.symbol} year={year}, {self.config.symbol}, start, end")
-
-        # logger.info("Cleaned NEWS has %s rows. Saving and uploading to S3...", len(news_clean))
-
-        # self.config.local_output.parent.mkdir(parents=True, exist_ok=True)
-
-        # local_clean = self.config.local_output.with_name(
-        #     f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_clean.parquet"
-        # )
-        # news_clean.to_parquet(local_clean, index=False)
-        # self.s3.upload(local_clean, clean_key)
-        # logger.info("Uploaded NEWS clean to s3://%s/%s", self.config.s3_bucket, clean_key)
-
-        # # relevance scoring
-        # if news_clean.empty:
-        #     news_rel = news_clean.copy()
-        #     news_rel["relevance_score"] = pd.Series(dtype="float32")
-        # else:
-        #     scores = self.scorer.score(
-        #         symbol=self.config.symbol,
-        #         headlines=news_clean["headline"].astype(str).tolist(),
-        #         summaries=news_clean["summary"].astype(str).tolist()
-        #         if "summary" in news_clean.columns
-        #         else None,
-        #     )
-        #     news_rel = news_clean.copy()
-        #     news_rel["relevance_score"] = scores.astype("float32")
-
-        # local_rel = self.config.local_output.with_name(
-        #     f"{self.config.local_output.stem}_{self.config.symbol}_{year}_news_rel.parquet"
-        # )
-        # news_rel.to_parquet(local_rel, index=False)
-        # self.s3.upload(local_rel, rel_key)
-        # logger.info("Uploaded NEWS+REL to s3://%s/%s", self.config.s3_bucket, rel_key)
 
     def run(self) -> None:
         logger.info("Starting News ingestion for %s (years %s-%s)...", self.config.symbol, self.config.start_year, self.config.end_year)
@@ -386,8 +351,24 @@ class NewsIngestor:
         logger.info("Need to ingest NEWS data for %s year(s).", len(processed_keys))
 
         raw_df = self.fetch_raw_data()
-        earliest = raw_df["date"].min().date()
-        latest = raw_df["date"].max().date()
+
+        # Filter by date window (year)
+        if "date" in raw_df.columns:
+            tmp_dt = pd.to_datetime(raw_df["date"], errors="coerce", utc=True)
+        elif "published_at" in raw_df.columns:
+            tmp_dt = pd.to_datetime(raw_df["published_at"], errors="coerce", utc=True)
+        else:
+            # desiquant news uses 'date' string column in raw dumps; if parquet kept it as 'date', above handles it.
+            tmp_dt = pd.to_datetime(raw_df.get("date"), errors="coerce", utc=True)
+
+        raw_df = raw_df.assign(_dt=tmp_dt)
+        invalid_dates = raw_df["_dt"].isna().sum()
+        raw_df = raw_df.dropna(subset=["_dt"])
+        if invalid_dates:
+            logger.debug("Dropped %s raw NEWS rows with invalid dates for %s", invalid_dates, self.config.symbol)
+        
+        earliest = raw_df["_dt"].min().date()
+        latest = raw_df["_dt"].max().date()
         logger.info("Available raw NEWS date range: %s to %s", earliest, latest)
 
         for y, pk in zip(years, processed_keys):
@@ -397,23 +378,37 @@ class NewsIngestor:
 
 
 class CorporateAnnouncementsIngestor:
+    """
+    Corporate Announcements ingestion pipeline:
+    1. Check which years need processing (based on processed S3 keys)
+    2. Download raw Corporate Announcements data from S3
+    3. For each year to process:
+       a. Filter raw Corporate Announcements by date range
+       b. Clean Corporate Announcements data
+       c. Upload processed Corporate Announcements to S3
+    """
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
         self.s3 = s3_client_factory(config.s3_bucket)
+        self.annoucements_sources = desiquant_constants.SUPPORTED_ANNOUNCEMENTS_SOURCES
+        self.dtcol_name_mapping = {
+            "bse": "news_dt",
+            "nse": "sort_date"
+        }
 
     @staticmethod
-    def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
-        # e.g., processed/corporate_announcements/TCS/2023/corporate_announcements_processed.parquet
-        return f"{prefix}/{symbol}/{year}/{processed_filename}"
+    def _processed_s3_object_key(prefix: str, symbol: str, year: int, source:str, processed_filename: str) -> str:
+        # e.g., processed/corporate_announcements/TCS/2023/bse/corporate_announcements_processed.parquet
+        return f"{prefix}/{symbol}/{year}/{source}/{processed_filename}"
     
     @staticmethod
-    def _raw_s3_object_key(prefix: str, symbol: str, raw_filename: str) -> str:
-        # e.g., raw/desiquant/corporate_announcements/TCS/corporate_announcements_raw.parquet
-        return f"{prefix}/{symbol}/{raw_filename}"
+    def _raw_s3_object_key(prefix: str, symbol: str, source: str, raw_filename: str) -> str:
+        # e.g., raw/desiquant/corporate_announcements/TCS/bse/corporate_announcements_raw.parquet
+        return f"{prefix}/{symbol}/{source}/{raw_filename}"
 
-    def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
+    def prepare_year_prefixes(self, source: str) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        processed_keys = [self._processed_s3_object_key(self.config.announcements_processed_prefix, self.config.symbol, y, self.config.announcements_processed_filename) for y in years]
+        processed_keys = [self._processed_s3_object_key(self.config.announcements_processed_prefix, self.config.symbol, y, source ,self.config.announcements_processed_filename) for y in years]
 
         remaining_years: List[int] = []
         remaining_processed: List[str] = []
@@ -424,10 +419,11 @@ class CorporateAnnouncementsIngestor:
                 remaining_years.append(y)
                 remaining_processed.append(key)
 
+        logger.debug("Years pending Corporate Announcements ingestion for %s (%s): %s", self.config.symbol, source, remaining_years)
         return remaining_years, remaining_processed
 
-    def fetch_raw_data(self) -> pd.DataFrame:
-        raw_key = self._raw_s3_object_key(self.config.announcements_raw_prefix, self.config.symbol, self.config.announcements_raw_filename)
+    def fetch_raw_data(self, source: str) -> pd.DataFrame:
+        raw_key = self._raw_s3_object_key(self.config.announcements_raw_prefix, self.config.symbol, source, self.config.announcements_raw_filename)
         logger.info("Reading RAW corporate announcements from s3://%s/%s", self.config.s3_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
@@ -439,10 +435,11 @@ class CorporateAnnouncementsIngestor:
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
+            logger.debug("Raw corporate announcements columns for %s/%s: %s", self.config.symbol, source, raw_df.columns.tolist())
 
             return raw_df
 
-    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, earliest: dt.date, latest: dt.date) -> None:
+    def ingest_year(self, year: int, processed_key: str, raw_df: pd.DataFrame, earliest: dt.date, latest: dt.date, source: str) -> None:
         start_date = _year_start_date(year, earliest)
         end_date = _year_end_date(year, latest)
 
@@ -450,35 +447,16 @@ class CorporateAnnouncementsIngestor:
 
         logger.info("Filtering Corporate Announcements for year %s: %s to %s...", year, start_date, end_date)
 
-        if "NEWS_DT" in raw_df.columns:
-            dtcol = pd.to_datetime(raw_df["NEWS_DT"], errors="coerce", utc=True)
-            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
-            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
+        filtered_df = raw_df[(raw_df["date"].dt.date >= start_date) & (raw_df["date"].dt.date <= end_date)].drop(columns=["date"])
+        logger.debug("Filtered %d Corporate Announcement rows for %s (%s) year %s", len(filtered_df), self.config.symbol, source, year)
 
-        # raw_key = f"{self.config.announcements_raw_prefix}/{self.config.symbol}/{year}/{self.config.announcements_raw_filename}"
-        # processed_key = f"{self.config.announcements_processed_prefix}/{self.config.symbol}/{year}/{self.config.announcements_processed_filename}"
-
-        # if self.s3.object_exists(processed_key):
-        #     logger.info("Processed corp announcements exists, skipping: s3://%s/%s", self.cfg.s3_bucket, processed_key)
-        #     return
-
-        # if not self.s3.object_exists(raw_key):
-        #     logger.warning("Raw corp announcements not found, skipping: s3://%s/%s", self.cfg.s3_bucket, raw_key)
-        #     return
-
-        # raw_df = _read_parquet_from_s3(self.s3.s3_client, self.cfg.s3_bucket, raw_key)
-
-        # Filter by year if NEWS_DT exists
-        if "NEWS_DT" in raw_df.columns:
-            dtcol = pd.to_datetime(raw_df["NEWS_DT"], errors="coerce", utc=True)
-            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
-            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
-
-        clean_df = clean_desiq_corporate_announcements(raw_df, symbol=self.config.symbol)
+        clean_df = clean_desiq_corporate_announcements(filtered_df, symbol=self.config.symbol, source=source)
+        logger.info("Cleaned Corporate Announcements has %s rows for %s (%s) year %s", len(clean_df), self.config.symbol, source, year)
 
         out_dir = self.config.local_output / "processed" / "corporate_announcements" / self.config.symbol / str(year)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / self.config.announcements_processed_filename
+        logger.debug("Writing cleaned Corporate Announcements parquet to %s", out_path)
         clean_df.to_parquet(out_path, index=False)
 
         self.s3.upload(out_path, processed_key)
@@ -490,28 +468,57 @@ class CorporateAnnouncementsIngestor:
         if self.config.start_year > self.config.end_year:
             raise ValueError("Start year cannot be after end year.")
 
-        years, processed_keys = self.prepare_year_prefixes()
-        if not processed_keys:
-            logger.info("All Corporate Announcements data already exists in S3. Nothing to ingest.")
-            return
+        for source in self.annoucements_sources:
+            logger.info("Processing source: %s", source)
 
-        logger.info("Need to ingest Corporate Announcements data for %s year(s).", len(processed_keys))
+            dtcol_name = self.dtcol_name_mapping.get(source.lower())
+            logger.debug("Using datetime column %s for source %s", dtcol_name, source)
 
-        raw_df = self.fetch_raw_data()
-        earliest = raw_df["date"].min().date()
-        latest = raw_df["date"].max().date()
-        logger.info("Available raw Corporate Announcements date range: %s to %s", earliest, latest)
+            years, processed_keys = self.prepare_year_prefixes(source)
+            if not processed_keys:
+                logger.info("All Corporate Announcements data already exists in S3 for %s. Nothing to ingest.", source)
+                continue
 
-        for y, pk in zip(years, processed_keys):
-            self.ingest_year(y, pk, raw_df, earliest, latest)
+            logger.info("Need to ingest Corporate Announcements data for %s year(s).", len(processed_keys))
+
+            raw_df = self.fetch_raw_data(source)
+
+            logger.info("Raw Columns: %s", raw_df.columns.tolist())
+
+            logger.info("Parsing %s column for date filtering...", dtcol_name)
+            dtcol = pd.to_datetime(raw_df[dtcol_name], errors="coerce", utc=True)
+            raw_df = raw_df.assign(date=dtcol)
+            invalid_dates = raw_df["date"].isna().sum()
+            raw_df = raw_df.dropna(subset=["date"])
+            if invalid_dates:
+                logger.debug("Dropped %s Corporate Announcement rows with invalid %s for %s", invalid_dates, dtcol_name, source)
+
+            earliest = raw_df["date"].min().date()
+            latest = raw_df["date"].max().date()
+            logger.info("Available raw Corporate Announcements date range: %s to %s", earliest, latest)
+
+            for y, pk in zip(years, processed_keys):
+                self.ingest_year(y, pk, raw_df, earliest, latest, source)
+
+            logger.info("Completed ingestion for source: %s", source)
 
         logger.info("Raw to processed ingestion pipeline for Corporate Announcements completed.")
 
 
 class FinancialResultsIngestor:
+    """
+    Financial Results ingestion pipeline:
+    1. Check which years need processing (based on processed S3 keys)
+    2. Download raw Financial Results data from S3
+    3. For each year to process:
+       a. Filter raw Financial Results by date range
+       b. Clean Financial Results data
+       c. Upload processed Financial Results to S3
+    """
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
         self.s3 = s3_client_factory(config.s3_bucket)
+        self.dtcol_name = "filingdate"
 
     @staticmethod
     def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
@@ -536,6 +543,7 @@ class FinancialResultsIngestor:
                 remaining_years.append(y)
                 remaining_processed.append(key)
 
+        logger.debug("Years pending Financial Results ingestion for %s: %s", self.config.symbol, remaining_years)
         return remaining_years, remaining_processed
 
     def fetch_raw_data(self) -> pd.DataFrame:
@@ -551,6 +559,7 @@ class FinancialResultsIngestor:
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
+            logger.debug("Raw Financial Results columns for %s: %s", self.config.symbol, raw_df.columns.tolist())
 
             return raw_df
 
@@ -562,31 +571,15 @@ class FinancialResultsIngestor:
 
         logger.info("Filtering Financial Results for year %s: %s to %s...", year, start_date, end_date)
 
-
-        # raw_key = f"{RAW_FIN_RESULTS_PREFIX}/{self.cfg.symbol}/{year}/{RAW_FIN_RESULTS_FILENAME}"
-        # processed_key = f"{PROCESSED_FIN_RESULTS_PREFIX}/{self.cfg.symbol}/{year}/{PROCESSED_FIN_RESULTS_FILENAME}"
-
-        # if self.s3.object_exists(processed_key):
-        #     logger.info("Processed financial results exists, skipping: s3://%s/%s", self.cfg.s3_bucket, processed_key)
-        #     return
-
-        # if not self.s3.object_exists(raw_key):
-        #     logger.warning("Raw financial results not found, skipping: s3://%s/%s", self.cfg.s3_bucket, raw_key)
-        #     return
-
-        # raw_df = _read_parquet_from_s3(self.s3.s3_client, self.cfg.s3_bucket, raw_key)
-
-        # Filter by year using filingDate (best signal)
-        if "filingDate" in raw_df.columns:
-            dtcol = pd.to_datetime(raw_df["filingDate"], errors="coerce", utc=True)
-            raw_df = raw_df.assign(_dt=dtcol).dropna(subset=["_dt"])
-            raw_df = raw_df[(raw_df["_dt"].dt.date >= start_date) & (raw_df["_dt"].dt.date <= end_date)].drop(columns=["_dt"])
-
-        clean_df = clean_desiq_financial_results(raw_df, symbol=self.config.symbol)
+        filtered_df = raw_df[(raw_df["date"].dt.date >= start_date) & (raw_df["date"].dt.date <= end_date)].drop(columns=["date"])
+        logger.debug("Filtered %d Financial Results rows for %s year %s", len(filtered_df), self.config.symbol, year)
+        clean_df = clean_desiq_financial_results(filtered_df, symbol=self.config.symbol)
+        logger.info("Cleaned Financial Results has %s rows for %s year %s", len(clean_df), self.config.symbol, year)
 
         out_dir = self.config.local_output / "processed" / "financial_results" / self.config.symbol / str(year)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / self.config.results_processed_filename
+        logger.debug("Writing cleaned Financial Results parquet to %s", out_path)
         clean_df.to_parquet(out_path, index=False)
 
         self.s3.upload(out_path, processed_key)
@@ -606,6 +599,19 @@ class FinancialResultsIngestor:
         logger.info("Need to ingest Financial Results data for %s year(s).", len(processed_keys))
 
         raw_df = self.fetch_raw_data()
+
+        logger.info("Raw Columns: %s", raw_df.columns.tolist())
+
+        logger.info("Parsing %s column for date filtering...", self.dtcol_name)
+
+        # Filter by year using filingdate (best signal)
+        dtcol = pd.to_datetime(raw_df[self.dtcol_name], errors="coerce", utc=True)
+        raw_df = raw_df.assign(date=dtcol)
+        invalid_dates = raw_df["date"].isna().sum()
+        raw_df = raw_df.dropna(subset=["date"])
+        if invalid_dates:
+            logger.debug("Dropped %s Financial Results rows with invalid %s", invalid_dates, self.dtcol_name)
+            
         earliest = raw_df["date"].min().date()
         latest = raw_df["date"].max().date()
         logger.info("Available raw Financial Results date range: %s to %s", earliest, latest)
