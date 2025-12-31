@@ -200,7 +200,7 @@ class OHLCVIngestor:
         logger.info("Ingesting OHLCV for year %s: %s to %s", year, start_date, end_date)
 
         logger.info("Filtering OHLCV for year %s: %s to %s...", year, start_date, end_date)
-        df = raw_df[(raw_df["date"] >= start_date) & (raw_df["date"] <= end_date)]
+        df = raw_df[(raw_df["date"].dt.date >= start_date) & (raw_df["date"].dt.date <= end_date)]
         logger.debug("Filtered %s OHLCV rows for %s year %s", len(df), self.config.symbol, year)
         if df.empty:
             logger.warning("No OHLCV data for %s after filtering %s → %s", self.config.symbol, start_date, end_date)
