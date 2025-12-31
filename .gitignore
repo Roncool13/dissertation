@@ -209,3 +209,4 @@ __marimo__/
 # Desiquant Downloaded data
 data/**/*.parquet
 data/**/*.csv
+notebooks/*.csv
