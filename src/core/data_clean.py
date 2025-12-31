@@ -63,95 +63,6 @@ def clean_ohlcv_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return df
 
 
-def clean_news_data(
-    df: pd.DataFrame,
-    symbol: str,
-    start_date: dt.date,
-    end_date: dt.date,
-) -> pd.DataFrame:
-    """
-    Clean raw news DataFrame and transform into canonical schema.
-    Keeps summary/link/query_used if present (useful for relevance + debugging).
-    """
-    if df.empty:
-        logger.info("Received empty news DataFrame for %s; skipping clean", symbol)
-        return df
-
-    logger.debug(
-        "Starting news clean for %s with %s rows, columns: %s, date window: %s -> %s",
-        symbol,
-        len(df),
-        list(df.columns),
-        start_date,
-        end_date,
-    )
-    df = df.copy()
-
-    # Standardize column names depending on provider
-    rename_map = {}
-    if "title" in df.columns and "headline" not in df.columns:
-        rename_map["title"] = "headline"
-    if "time_published" in df.columns and "published_at" not in df.columns:
-        rename_map["time_published"] = "published_at"
-    df.rename(columns=rename_map, inplace=True)
-    if rename_map:
-        logger.debug("Applied news column renames: %s", rename_map)
-
-    required_cols = ["headline", "source", "published_at"]
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        logger.error("News DataFrame missing required columns: %s", missing)
-        raise ValueError(f"News DataFrame missing columns: {missing}")
-
-    df["published_at"] = pd.to_datetime(df["published_at"], utc=True, errors="coerce")
-    df["date"] = df["published_at"].dt.date
-    before_date_filter = len(df)
-    df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
-    logger.debug("Filtered %s news rows outside date window", before_date_filter - len(df))
-    df["symbol"] = symbol
-
-    # Keep optional columns if present
-    for optional in ["summary", "link", "query_used"]:
-        if optional not in df.columns:
-            df[optional] = pd.NA
-
-    # Placeholder sentiment (FinBERT pipeline will fill later)
-    df["sentiment_score"] = 0.0
-    df["sentiment_label"] = "neutral"
-
-    df = df[
-        [
-            "date",
-            "symbol",
-            "headline",
-            "summary",
-            "source",
-            "published_at",
-            "link",
-            "query_used",
-            "sentiment_score",
-            "sentiment_label",
-        ]
-    ]
-
-    before_dropna = len(df)
-    df.dropna(subset=["headline", "published_at"], inplace=True)
-    logger.debug("Dropped %s news rows missing headline/published_at", before_dropna - len(df))
-    before_dupes = len(df)
-    df.drop_duplicates(subset=["symbol", "headline", "published_at"], inplace=True)
-    logger.debug("Removed %s duplicate news rows", before_dupes - len(df))
-    df.sort_values(["symbol", "date", "published_at"], inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    logger.info(
-        "Completed news clean for %s with %s rows between %s and %s",
-        symbol,
-        len(df),
-        df["date"].min(),
-        df["date"].max(),
-    )
-    return df
-
-
 # --- Desiquant raw -> canonical cleaners (news / corp announcements / financial results) ---
 
 def _safe_json(x):
@@ -230,61 +141,6 @@ def clean_desiq_news_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return out
 
 
-# def clean_desiq_corporate_announcements(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-#     """
-#     Desiquant corporate announcements raw -> canonical announcements schema.
-
-#     Your CSV looks like it has:
-#       NEWS_DT, HEADLINE, NEWSSUB, CATEGORYNAME, SUBCATNAME, ATTACHMENTNAME, ...
-#     Output cols:
-#       date, symbol, headline, details, category, subcategory, attachment_name, attachment_link, relevance_score
-#     """
-#     if df.empty:
-#         return df
-
-#     d = df.copy()
-
-#     # Date
-#     if "news_dt" not in d.columns:
-#         raise ValueError("Corporate announcements missing column: news_dt")
-#     d["published_at"] = pd.to_datetime(d["news_dt"], errors="coerce", utc=True)
-#     d["date"] = d["published_at"].dt.date
-
-#     # Text fields
-#     d["headline"] = d["HEADLINE"].astype(str).str.strip() if "HEADLINE" in d.columns else pd.NA
-#     d["details"] = d["NEWSSUB"] if "NEWSSUB" in d.columns else pd.NA
-
-#     d["category"] = d["CATEGORYNAME"] if "CATEGORYNAME" in d.columns else pd.NA
-#     d["subcategory"] = d["SUBCATNAME"] if "SUBCATNAME" in d.columns else pd.NA
-
-#     d["attachment_name"] = d["ATTACHMENTNAME"] if "ATTACHMENTNAME" in d.columns else pd.NA
-#     d["attachment_link"] = d["ATTACHMENTLINK"] if "ATTACHMENTLINK" in d.columns else pd.NA
-
-#     d["symbol"] = symbol
-#     d["relevance_score"] = 1.0  # placeholder
-
-#     out = d[
-#         [
-#             "date",
-#             "symbol",
-#             "headline",
-#             "details",
-#             "category",
-#             "subcategory",
-#             "published_at",
-#             "attachment_name",
-#             "attachment_link",
-#             "relevance_score",
-#         ]
-#     ].copy()
-
-#     out.dropna(subset=["headline", "published_at"], inplace=True)
-#     out.drop_duplicates(subset=["symbol", "headline", "published_at"], inplace=True)
-#     out.sort_values(["symbol", "date", "published_at"], inplace=True)
-#     out.reset_index(drop=True, inplace=True)
-#     return out
-
-
 def clean_desiq_corporate_announcements(
     df: pd.DataFrame,
     symbol: str,
@@ -348,6 +204,8 @@ def clean_desiq_corporate_announcements(
                 "attachment_url": df.get("NSURL"),  # BSE often uses same URL for attachment/doc
                 "attachment_name": df.get("ATTACHMENTNAME"),
                 "raw_id": df.get("NEWSID"),
+                "relevance_score": 1.0,  # placeholder
+                "relevance_label": "high"
             }
         )
 
@@ -356,7 +214,6 @@ def clean_desiq_corporate_announcements(
 
         # Choose best timestamp column available
         ts_col = None
-        # for c in ["sort_date", "exchdisstime", "an_dt", "dt"]:
         for c in ["SORT_DATE", "EXCHDISSTIME", "AN_DT", "DT"]:
             if c in df.columns:
                 ts_col = c
@@ -364,26 +221,9 @@ def clean_desiq_corporate_announcements(
         published_at = pd.to_datetime(df.get(ts_col), errors="coerce") if ts_col else pd.to_datetime(pd.NA)
 
         # NSE "desc" is usually the short headline; "attchmntText" is the longer text.
-        # headline = df.get("desc")
-        # details = df.get("attchmntText")
         headline = df.get("DESC")
         details = df.get("ATTCHMNTTEXT")
 
-        # out = pd.DataFrame(
-        #     {
-        #         "published_at": published_at,
-        #         "headline": headline,
-        #         "subject": pd.NA,  # not present in NSE feed
-        #         "details": details,
-        #         "category": df.get("smIndustry"),
-        #         "subcategory": pd.NA,
-        #         "announcement_type": pd.NA,
-        #         "url": df.get("attchmntFile"),       # often the document URL
-        #         "attachment_url": df.get("attchmntFile"),
-        #         "attachment_name": pd.NA,            # no filename field; keep NA
-        #         "raw_id": df.get("seq_id"),
-        #     }
-        # )
         out = pd.DataFrame(
             {
                 "published_at": published_at,
@@ -397,6 +237,8 @@ def clean_desiq_corporate_announcements(
                 "attachment_url": df.get("ATTCHMNTFILE"),
                 "attachment_name": pd.NA,            # no filename field; keep NA
                 "raw_id": df.get("SEQ_ID"),
+                "relevance_score": 1.0,  # placeholder
+                "relevance_label": "high"
             }
         )
 
@@ -443,6 +285,8 @@ def clean_desiq_corporate_announcements(
             "attachment_url",
             "attachment_name",
             "raw_id",
+            "relevance_score",
+            "relevance_label"
         ]
     ]
 
@@ -512,6 +356,8 @@ def clean_desiq_financial_results(df: pd.DataFrame, symbol: str) -> pd.DataFrame
 
     d["symbol"] = symbol
     d["relevance_score"] = 1.0  # placeholder
+    d["relevance_label"] = "high"
+
 
     out = d[
         [
@@ -528,6 +374,7 @@ def clean_desiq_financial_results(df: pd.DataFrame, symbol: str) -> pd.DataFrame
             "eps",
             "text_blob",
             "relevance_score",
+            "relevance_label"
         ]
     ].copy()
 
