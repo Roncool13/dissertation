@@ -1,117 +1,135 @@
 # src/nlp/relevance_scoring.py
+
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Iterable
 
 import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer, util
-
-from src.constants.symbols import SYMBOL_TO_DESCRIPTION
-
-
-DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FINANCE_TERMS = [
+    "earnings", "results", "profit", "revenue", "guidance", "margin", "deal", "order",
+    "contract", "client", "dividend", "buyback", "acquisition", "merger", "stake",
+    "SEBI", "NSE", "BSE", "share", "stock", "quarter", "Q1", "Q2", "Q3", "Q4",
+    "FY", "fiscal", "outlook", "target", "rating", "upgrade", "downgrade",
+]
+
+
+def _safe_text(x) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return ""
+    return str(x).strip()
+
+
+def _build_doc_text(df: pd.DataFrame) -> pd.Series:
+    headline = df.get("headline", pd.Series([""] * len(df))).map(_safe_text)
+    summary = df.get("summary", pd.Series([""] * len(df))).map(_safe_text)
+    # headline carries more signal → duplicate it slightly
+    return (headline + " " + headline + " " + summary).str.strip()
+
+
+def _build_query_text(symbol: str, company_name: str | None, extra_terms: Iterable[str] | None) -> str:
+    parts = [symbol]
+    if company_name:
+        parts.append(company_name)
+        # common aliasing improvements
+        parts.append(company_name.replace("Limited", "").replace("Ltd", "").strip())
+    parts.extend(DEFAULT_FINANCE_TERMS)
+    if extra_terms:
+        parts.extend(list(extra_terms))
+    # keep non-empty unique-ish
+    parts = [p for p in parts if p and isinstance(p, str)]
+    return " ".join(parts)
+
+
+@dataclass
+class PercentileLabelConfig:
+    high_pct: float = 0.90    # top 10%
+    medium_pct: float = 0.70  # next 20%
+    # rest → low
+
 
 class RelevanceScorer:
-    def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("Initializing SentenceTransformer model %s on device=%s", model_name, device)
-        self.model = SentenceTransformer(model_name, device=device)
+    """
+    TF-IDF + cosine similarity relevance scorer.
 
-    @staticmethod
-    def _build_text(headline: str, summary: Optional[str]) -> str:
-        if summary and isinstance(summary, str) and summary.strip():
-            return f"{headline}. {summary}"
-        return headline
+    Key: labels are assigned by percentiles so you don't get "all low"
+    due to tiny cosine similarity values.
+    """
 
-    def score(self, symbol: str, headlines: List[str], summaries: Optional[List[str]] = None) -> np.ndarray:
-        if symbol not in SYMBOL_TO_DESCRIPTION:
-            raise ValueError(f"No SYMBOL_TO_DESCRIPTION found for {symbol!r} in constants.py")
+    def __init__(
+        self,
+        label_cfg: PercentileLabelConfig | None = None,
+        ngram_range: tuple[int, int] = (1, 2),
+        stop_words: str | None = "english",
+    ):
+        self.label_cfg = label_cfg or PercentileLabelConfig()
+        self.vectorizer = TfidfVectorizer(
+            ngram_range=ngram_range,
+            stop_words=stop_words,
+            sublinear_tf=True,
+            min_df=1,
+        )
 
-        if summaries is None:
-            summaries = [None] * len(headlines)
+    def score_news(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        company_name: str | None = None,
+        extra_terms: Iterable[str] | None = None,
+        score_col: str = "relevance_score",
+        label_col: str = "relevance_label",
+    ) -> pd.DataFrame:
+        """
+        Adds relevance_score + relevance_label to cleaned news DF.
 
-        logger.debug("Scoring relevance for %s headlines for symbol %s", len(headlines), symbol)
-        stock_text = SYMBOL_TO_DESCRIPTION[symbol]
-        news_texts = [self._build_text(h, s) for h, s in zip(headlines, summaries)]
+        Expected columns: headline, summary (summary optional but recommended)
+        """
+        if df is None or df.empty:
+            logger.info("Relevance scoring: empty DF for %s", symbol)
+            return df
 
-        logger.debug("Encoding stock description for %s", symbol)
-        stock_emb = self.model.encode(stock_text, convert_to_tensor=True, normalize_embeddings=True)
-        logger.debug("Encoding %s news items", len(news_texts))
-        news_embs = self.model.encode(news_texts, convert_to_tensor=True, normalize_embeddings=True)
+        out = df.copy()
 
-        cosine = util.cos_sim(news_embs, stock_emb).squeeze(dim=1)  # [-1,1]
-        rel = (cosine + 1.0) / 2.0  # [0,1]
-        logger.info("Computed relevance scores for %s items for symbol %s", len(rel), symbol)
-        return rel.cpu().numpy()
-    
+        doc_text = _build_doc_text(out)
+        query_text = _build_query_text(symbol=symbol, company_name=company_name, extra_terms=extra_terms)
 
-# # src/nlp/relevance_scoring.py
-# from __future__ import annotations
+        # Fit on corpus + query so query tokens aren't completely OOV
+        corpus = doc_text.tolist() + [query_text]
+        X = self.vectorizer.fit_transform(corpus)
 
-# from typing import List, Optional
+        doc_vecs = X[:-1]
+        q_vec = X[-1]
 
-# import numpy as np
-# import pandas as pd
-# import torch
-# from sentence_transformers import SentenceTransformer, util
+        sims = cosine_similarity(doc_vecs, q_vec).reshape(-1)
+        out[score_col] = sims.astype(float)
 
-# from src.constants_news import SYMBOL_TO_DESCRIPTION
+        # Percentile-based labels (per symbol batch)
+        hi = float(np.quantile(sims, self.label_cfg.high_pct)) if len(sims) > 1 else float(sims[0])
+        med = float(np.quantile(sims, self.label_cfg.medium_pct)) if len(sims) > 1 else float(sims[0])
 
+        def _label(v: float) -> str:
+            if v >= hi and hi > 0:
+                return "high"
+            if v >= med and med > 0:
+                return "medium"
+            return "low"
 
-# DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+        out[label_col] = [ _label(v) for v in sims ]
 
-
-# class RelevanceScorer:
-#     """
-#     Computes semantic relevance between stock description and news text.
-#     """
-
-#     def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL):
-#         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-#         self.model = SentenceTransformer(model_name, device=self.device)
-
-#     def _build_news_text(self, headline: str, summary: Optional[str]) -> str:
-#         if summary and isinstance(summary, str):
-#             return f"{headline}. {summary}"
-#         return headline
-
-#     def score(
-#         self,
-#         symbol: str,
-#         headlines: List[str],
-#         summaries: Optional[List[str]] = None,
-#     ) -> np.ndarray:
-#         """
-#         Returns relevance scores in [0, 1] for each article.
-#         """
-#         if symbol not in SYMBOL_TO_DESCRIPTION:
-#             raise ValueError(f"No semantic description found for symbol {symbol}")
-
-#         stock_text = SYMBOL_TO_DESCRIPTION[symbol]
-
-#         if summaries is None:
-#             summaries = [None] * len(headlines)
-
-#         news_texts = [
-#             self._build_news_text(h, s)
-#             for h, s in zip(headlines, summaries)
-#         ]
-
-#         # Encode
-#         stock_emb = self.model.encode(
-#             stock_text, convert_to_tensor=True, normalize_embeddings=True
-#         )
-#         news_embs = self.model.encode(
-#             news_texts, convert_to_tensor=True, normalize_embeddings=True
-#         )
-
-#         # Cosine similarity → [-1, 1], convert to [0, 1]
-#         cosine_scores = util.cos_sim(news_embs, stock_emb).squeeze(dim=1)
-#         relevance_scores = (cosine_scores + 1.0) / 2.0
-
-#         return relevance_scores.cpu().numpy()
+        logger.info(
+            "Relevance scoring done for %s: score[min=%.6f, median=%.6f, max=%.6f], "
+            "labels=%s",
+            symbol,
+            float(np.min(sims)),
+            float(np.median(sims)),
+            float(np.max(sims)),
+            dict(pd.Series(out[label_col]).value_counts()),
+        )
+        return out
