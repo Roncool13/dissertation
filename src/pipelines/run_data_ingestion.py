@@ -20,16 +20,15 @@ from pandas.tseries.offsets import BDay
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
+from src.nlp.relevance_scoring import RelevanceScorer
 import src.constants.symbols as symbols_constants
 import src.constants.storage as storage_constants
 import src.constants.desiquant as desiquant_constants
 from src.config import setup_logging
 from src.core.data_transformations import aggregate_intraday_to_daily
 from src.io.connections import S3Connection
-# from src.nlp.relevance_scoring import RelevanceScorer
 from src.core.data_clean import (
-    clean_ohlcv_data, 
-    clean_news_data,
+    clean_ohlcv_data,
     clean_desiq_news_data,
     clean_desiq_corporate_announcements,
     clean_desiq_financial_results,
@@ -261,12 +260,12 @@ class NewsIngestor:
     def __init__(
         self,
         config: IngestConfig,
-        s3_client_factory: Callable[[str], S3Client] = S3Client,
-        # scorer: Optional[RelevanceScorer] = None,
+        s3_client_factory: Callable[[str], S3Client] = S3Client
     ):
         self.config = config
         self.s3 = s3_client_factory(config.s3_bucket)
-        # self.scorer = scorer or RelevanceScorer()
+        self.company_name = symbols_constants.SYMBOL_TO_COMPANY[config.symbol]
+        self.scorer = RelevanceScorer()
 
     @staticmethod
     def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
@@ -326,6 +325,10 @@ class NewsIngestor:
 
         news_clean = clean_desiq_news_data(raw_df, symbol=self.config.symbol)
         logger.info("Cleaned NEWS has %s rows for %s year %s", len(news_clean), self.config.symbol, year)
+
+        logger.info("Cleaned Columns: %s", news_clean.columns.tolist())
+        
+        news_clean = self.scorer.score_news(news_clean, symbol=self.config.symbol, company_name=self.company_name)
 
         # write local -> upload (keep same pattern you use elsewhere)
         out_dir = self.config.local_output / "processed" / "news" / self.config.symbol / str(year)
@@ -395,6 +398,7 @@ class CorporateAnnouncementsIngestor:
             "bse": "news_dt",
             "nse": "sort_date"
         }
+        self.company_name = symbols_constants.SYMBOL_TO_COMPANY[config.symbol]
 
     @staticmethod
     def _processed_s3_object_key(prefix: str, symbol: str, year: int, source:str, processed_filename: str) -> str:
@@ -452,6 +456,8 @@ class CorporateAnnouncementsIngestor:
 
         clean_df = clean_desiq_corporate_announcements(filtered_df, symbol=self.config.symbol, source=source)
         logger.info("Cleaned Corporate Announcements has %s rows for %s (%s) year %s", len(clean_df), self.config.symbol, source, year)
+
+        logger.info("Cleaned Columns: %s", clean_df.columns.tolist())
 
         out_dir = self.config.local_output / "processed" / "corporate_announcements" / self.config.symbol / str(year)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -519,6 +525,7 @@ class FinancialResultsIngestor:
         self.config = config
         self.s3 = s3_client_factory(config.s3_bucket)
         self.dtcol_name = "filingdate"
+        self.company_name = symbols_constants.SYMBOL_TO_COMPANY[config.symbol]
 
     @staticmethod
     def _processed_s3_object_key(prefix: str, symbol: str, year: int, processed_filename: str) -> str:
@@ -575,6 +582,8 @@ class FinancialResultsIngestor:
         logger.debug("Filtered %d Financial Results rows for %s year %s", len(filtered_df), self.config.symbol, year)
         clean_df = clean_desiq_financial_results(filtered_df, symbol=self.config.symbol)
         logger.info("Cleaned Financial Results has %s rows for %s year %s", len(clean_df), self.config.symbol, year)
+
+        logger.info("Cleaned Columns: %s", clean_df.columns.tolist())
 
         out_dir = self.config.local_output / "processed" / "financial_results" / self.config.symbol / str(year)
         out_dir.mkdir(parents=True, exist_ok=True)
