@@ -539,7 +539,7 @@ class FinancialResultsIngestor:
 
     def prepare_year_prefixes(self) -> Tuple[List[int], List[str]]:
         years = list(range(self.config.start_year, self.config.end_year + 1))
-        processed_keys = [self._processed_s3_object_key(self.config.results_raw_prefix, self.config.symbol, y, self.config.results_processed_filename) for y in years]
+        processed_keys = [self._processed_s3_object_key(self.config.results_processed_prefix, self.config.symbol, y, self.config.results_processed_filename) for y in years]
 
         remaining_years: List[int] = []
         remaining_processed: List[str] = []
