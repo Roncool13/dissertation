@@ -94,13 +94,20 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # RSI / ATR / Volatility
     g["rsi_14"] = g.groupby("symbol")["close"].transform(lambda s: _rsi(s, 14))
-    atr_series = (
-        g.groupby("symbol")
-        .apply(lambda grp: _atr(grp["high"], grp["low"], grp["close"], 14))
-        .reset_index(level=0, drop=True)
-    )
-    # Align back to original rows in case groupby ordering differs
-    atr_series = atr_series.reindex(g.index)
+
+    def _atr_for_group(grp: pd.DataFrame) -> pd.Series:
+        # return a *Series* aligned to grp.index, with a stable name
+        s = _atr(grp["high"], grp["low"], grp["close"], 14)
+        s.name = "atr_14"
+        return s
+
+    # silence future pandas behavior & keep index aligned
+    try:
+        atr_series = g.groupby("symbol", group_keys=False).apply(_atr_for_group, include_groups=False)
+    except TypeError:
+        # older pandas doesn't support include_groups
+        atr_series = g.groupby("symbol", group_keys=False).apply(_atr_for_group)
+
     g["atr_14"] = atr_series
     g["volatility_20"] = g.groupby("symbol")["log_ret_1d"].transform(lambda s: s.rolling(20, min_periods=20).std())
 
