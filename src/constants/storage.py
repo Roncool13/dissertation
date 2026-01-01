@@ -30,3 +30,6 @@ PROCESSED_OHLCV_FILENAME = "ohlcv_processed.parquet"
 PROCESSED_NEWS_FILENAME = "news_processed.parquet"
 PROCESSED_CORP_ANN_FILENAME = "corporate_announcements_processed.parquet"
 PROCESSED_FIN_RESULTS_FILENAME = "financial_results_processed.parquet"
+
+# Feature-store-zone data prefixes
+FEATURE_STORE_OHLCV_PREFIX = f"{PROCESSED_S3_PREFIX}/features"
