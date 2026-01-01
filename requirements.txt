@@ -1,10 +1,11 @@
 boto3
-jugaad-data
+feast
 feedparser
 requests
 numpy
 pandas
 pyarrow
+scikit-learn
 s3fs>=2023.12.2
 sentence-transformers>=2.2.2
 torch
