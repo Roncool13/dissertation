@@ -95,20 +95,22 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # RSI / ATR / Volatility
     g["rsi_14"] = g.groupby("symbol")["close"].transform(lambda s: _rsi(s, 14))
 
-    def _atr_for_group(grp: pd.DataFrame) -> pd.Series:
-        # return a *Series* aligned to grp.index, with a stable name
-        s = _atr(grp["high"], grp["low"], grp["close"], 14)
-        s.name = "atr_14"
-        return s
+    # --- ATR without groupby.apply ---
+    g["prev_close"] = g.groupby("symbol")["close"].shift(1)
 
-    # silence future pandas behavior & keep index aligned
-    try:
-        atr_series = g.groupby("symbol", group_keys=False).apply(_atr_for_group, include_groups=False)
-    except TypeError:
-        # older pandas doesn't support include_groups
-        atr_series = g.groupby("symbol", group_keys=False).apply(_atr_for_group)
+    tr1 = (g["high"] - g["low"]).abs()
+    tr2 = (g["high"] - g["prev_close"]).abs()
+    tr3 = (g["low"] - g["prev_close"]).abs()
 
-    g["atr_14"] = atr_series
+    g["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    g["atr_14"] = g.groupby("symbol")["tr"].transform(
+        lambda s: s.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    )
+
+    g.drop(columns=["prev_close", "tr"], inplace=True)
+    # -------------------------------
+    
     g["volatility_20"] = g.groupby("symbol")["log_ret_1d"].transform(lambda s: s.rolling(20, min_periods=20).std())
 
     # Simple range / candle body features (often useful)
