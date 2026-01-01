@@ -94,7 +94,10 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # RSI / ATR / Volatility
     g["rsi_14"] = g.groupby("symbol")["close"].transform(lambda s: _rsi(s, 14))
-    g["atr_14"] = g.groupby("symbol").apply(lambda x: _atr(x["high"], x["low"], x["close"], 14)).reset_index(level=0, drop=True)
+    g["atr_14"] = (
+        g.groupby("symbol", group_keys=False)[["high", "low", "close"]]
+        .apply(lambda x: _atr(x["high"], x["low"], x["close"], 14))
+    )
     g["volatility_20"] = g.groupby("symbol")["log_ret_1d"].transform(lambda s: s.rolling(20, min_periods=20).std())
 
     # Simple range / candle body features (often useful)
