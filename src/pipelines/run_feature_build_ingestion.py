@@ -15,6 +15,7 @@ Assumptions / conventions (aligned to your current layout):
 from __future__ import annotations
 
 # Standard library imports
+import sys
 import argparse
 import logging
 import tempfile
@@ -25,6 +26,9 @@ from typing import List
 # Third-party imports
 import numpy as np
 import pandas as pd
+
+# Add parent directory to path for local imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
 from src.config import setup_logging
