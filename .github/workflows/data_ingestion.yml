@@ -99,9 +99,6 @@ jobs:
             --s3-bucket '$S3_BUCKET' \
             --log-level '${{ inputs.log_level }}'"
 
-          # Your script supports:
-          #   --ohlcv-only  => disables news
-          #   --news-only   => disables ohlcv
           if [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_news }}" = "true" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
             CMD="$CMD --news-only"
           elif [ "${{ inputs.ingest_news }}" = "false" ] && [ "${{ inputs.ingest_ohlcv }}" = "true" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
