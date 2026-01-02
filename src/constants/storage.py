@@ -33,3 +33,4 @@ PROCESSED_FIN_RESULTS_FILENAME = "financial_results_processed.parquet"
 
 # Feature-store-zone data prefixes
 FEATURE_STORE_OHLCV_PREFIX = f"{PROCESSED_S3_PREFIX}/features"
+FEATURE_STORE_OHLCV_FILENAME = "ohlcv_features.parquet"
