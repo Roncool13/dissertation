@@ -130,10 +130,10 @@ class FeatureBuildConfig:
     symbols: List[str]
     start_year: int
     end_year: int
-    processed_prefix: str = "processed"
-    ohlcv_relpath: str = "ohlcv"
-    output_key: str = "processed/features/ohlcv_features.parquet"
+    processed_ohlcv_prefix: str = storage_constants.PROCESSED_OHLCV_PREFIX
+    processed_ohlcv_filename: str = storage_constants.PROCESSED_OHLCV_FILENAME
     output_key_prefix: str = storage_constants.FEATURE_STORE_OHLCV_PREFIX
+    output_filename: str = storage_constants.FEATURE_STORE_OHLCV_FILENAME
 
 
 class OhlcvFeatureBuildIngestor:
@@ -146,10 +146,10 @@ class OhlcvFeatureBuildIngestor:
         self.s3 = S3Connection(bucket=cfg.bucket)
 
     def _input_key(self, symbol: str, year: int) -> str:
-        return f"{self.cfg.processed_prefix}/{self.cfg.ohlcv_relpath}/{symbol}/{year}/ohlcv_processed.parquet"
+        return f"{self.cfg.processed_ohlcv_prefix}/{symbol}/{year}/{self.cfg.processed_ohlcv_filename}"
     
-    def _output_key(self, symbol: str) -> str:
-        return f"{self.cfg.output_key_prefix}/{symbol}/ohlcv_features.parquet"
+    def _output_key(self) -> str:
+        return f"{self.cfg.output_key_prefix}/{self.cfg.output_filename}"
 
     def _download_parquet(self, key: str, dst: Path) -> None:
         # Minimal download helper (S3Connection currently only uploads; use boto3 client directly)
@@ -181,13 +181,13 @@ class OhlcvFeatureBuildIngestor:
         df = df[(df["date"].dt.year == year)]
         return df
 
-    def build(self, symbol: str) -> pd.DataFrame:
-        # for symbol in self.cfg.symbols:
+    def build(self) -> pd.DataFrame:
         frames = []
-        for year in range(self.cfg.start_year, self.cfg.end_year + 1):
-            df_y = self._load_year(symbol, year)
-            if not df_y.empty:
-                frames.append(df_y)
+        for symbol in self.cfg.symbols:
+            for year in range(self.cfg.start_year, self.cfg.end_year + 1):
+                df_y = self._load_year(symbol, year)
+                if not df_y.empty:
+                    frames.append(df_y)
 
         if not frames:
             raise RuntimeError("No processed OHLCV found for the requested symbols/years.")
@@ -216,12 +216,9 @@ class OhlcvFeatureBuildIngestor:
 
     def run(self) -> None:
         logger.info("Starting OHLCV feature build ingestion...")
-        for symbol in self.cfg.symbols:
-            logger.info("Building features for symbol: %s", symbol)
-            feats = self.build(symbol)
-            output_path = self._output_key(symbol)
-            self.write_to_s3(feats, output_path)
-            logger.info("Done building features for symbol: %s", symbol)
+        feats = self.build()
+        output_path = self._output_key()
+        self.write_to_s3(feats, output_path)
         logger.info("OHLCV feature build ingestion complete.")
             
 
