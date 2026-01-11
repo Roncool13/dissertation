@@ -42,7 +42,8 @@ class IngestConfig:
     start_year: int
     end_year: int
     local_output: Path
-    s3_bucket: str
+    s3_raw_bucket: str
+    s3_processed_bucket: str
 
     # Raw Prefixes
     ohlcv_raw_prefix: str = storage_constants.RAW_DESIQUANT_OHLCV_PREFIX
@@ -129,7 +130,8 @@ class OHLCVIngestor:
 
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
-        self.s3 = s3_client_factory(config.s3_bucket)
+        self.s3_raw = s3_client_factory(config.s3_raw_bucket)
+        self.s3_processed = s3_client_factory(config.s3_processed_bucket)
 
     @staticmethod
     def validate_year_arg(arg: str) -> int:
@@ -162,8 +164,8 @@ class OHLCVIngestor:
         remaining_years: List[int] = []
         remaining_processed: List[str] = []
         for y, key in zip(years, processed_keys):
-            if self.s3.exists(key):
-                logger.info("OHLCV exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+            if self.s3_processed.exists(key):
+                logger.info("OHLCV exists; skipping year=%s at s3://%s/%s", y, self.config.s3_processed_bucket, key)
             else:
                 remaining_years.append(y)
                 remaining_processed.append(key)
@@ -173,14 +175,14 @@ class OHLCVIngestor:
     
     def fetch_raw_data(self) -> pd.DataFrame:
         raw_key = self._raw_s3_object_key(self.config.ohlcv_raw_prefix, self.config.symbol, self.config.ohlcv_raw_filename)
-        logger.info("Reading RAW candles from s3://%s/%s", self.config.s3_bucket, raw_key)
+        logger.info("Reading RAW candles from s3://%s/%s", self.config.s3_raw_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
-            if not self.s3.exists(raw_key):
-                raise FileNotFoundError(f"RAW candles not found at s3://{self.config.s3_bucket}/{raw_key}")
+            if not self.s3_raw.exists(raw_key):
+                raise FileNotFoundError(f"RAW candles not found at s3://{self.config.s3_raw_bucket}/{raw_key}")
 
-            self.s3.download(raw_key, raw_local)
+            self.s3_raw.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
@@ -216,8 +218,8 @@ class OHLCVIngestor:
         )
         logger.debug("Writing OHLCV parquet to %s", local_path)
         df.to_parquet(local_path, index=False)
-        self.s3.upload(local_path, processed_key)
-        logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_bucket, processed_key)
+        self.s3_processed.upload(local_path, processed_key)
+        logger.info("Uploaded OHLCV to s3://%s/%s", self.config.s3_processed_bucket, processed_key)
 
     def run(self) -> None:
         logger.info("Starting OHLCV ingestion for %s (years %s-%s)...", self.config.symbol, self.config.start_year, self.config.end_year)
@@ -261,7 +263,8 @@ class NewsIngestor:
         s3_client_factory: Callable[[str], S3Client] = S3Client
     ):
         self.config = config
-        self.s3 = s3_client_factory(config.s3_bucket)
+        self.s3_raw = s3_client_factory(config.s3_raw_bucket)
+        self.s3_processed = s3_client_factory(config.s3_processed_bucket)
         self.company_name = symbols_constants.SYMBOL_TO_COMPANY[config.symbol]
         self.scorer = RelevanceScorer()
 
@@ -284,8 +287,8 @@ class NewsIngestor:
 
         for y, ck in zip(years, processed_keys):
             # If relevance layer exists, consider year done
-            if self.s3.exists(ck):
-                logger.info("NEWS exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, ck)
+            if self.s3_processed.exists(ck):
+                logger.info("NEWS exists; skipping year=%s at s3://%s/%s", y, self.config.s3_processed_bucket, ck)
             else:
                 remaining_years.append(y)
                 remaining_processed.append(ck)
@@ -295,14 +298,14 @@ class NewsIngestor:
     
     def fetch_raw_data(self) -> pd.DataFrame:
         raw_key = self._raw_s3_object_key(self.config.news_raw_prefix, self.config.symbol, self.config.news_raw_filename)
-        logger.info("Reading RAW news from s3://%s/%s", self.config.s3_bucket, raw_key)
+        logger.info("Reading RAW news from s3://%s/%s", self.config.s3_raw_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
-            if not self.s3.exists(raw_key):
-                raise FileNotFoundError(f"RAW news not found at s3://{self.config.s3_bucket}/{raw_key}")
+            if not self.s3_raw.exists(raw_key):
+                raise FileNotFoundError(f"RAW news not found at s3://{self.config.s3_raw_bucket}/{raw_key}")
 
-            self.s3.download(raw_key, raw_local)
+            self.s3_raw.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
@@ -335,8 +338,8 @@ class NewsIngestor:
         logger.debug("Writing cleaned NEWS parquet to %s", out_path)
         news_clean.to_parquet(out_path, index=False)
 
-        self.s3.upload(out_path, processed_key)
-        logger.info("Uploaded processed news to s3://%s/%s", self.config.s3_bucket, processed_key)
+        self.s3_processed.upload(out_path, processed_key)
+        logger.info("Uploaded processed news to s3://%s/%s", self.config.s3_processed_bucket, processed_key)
 
     def run(self) -> None:
         logger.info("Starting News ingestion for %s (years %s-%s)...", self.config.symbol, self.config.start_year, self.config.end_year)
@@ -390,8 +393,9 @@ class CorporateAnnouncementsIngestor:
     """
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
-        self.s3 = s3_client_factory(config.s3_bucket)
-        self.annoucements_sources = desiquant_constants.SUPPORTED_ANNOUNCEMENTS_SOURCES
+        self.s3_raw = s3_client_factory(config.s3_raw_bucket)
+        self.s3_processed = s3_client_factory(config.s3_processed_bucket)
+        self.announcements_sources = desiquant_constants.SUPPORTED_ANNOUNCEMENTS_SOURCES
         self.dtcol_name_mapping = {
             "bse": "news_dt",
             "nse": "sort_date"
@@ -415,8 +419,8 @@ class CorporateAnnouncementsIngestor:
         remaining_years: List[int] = []
         remaining_processed: List[str] = []
         for y, key in zip(years, processed_keys):
-            if self.s3.exists(key):
-                logger.info("Corporate Announcements exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+            if self.s3_processed.exists(key):
+                logger.info("Corporate Announcements exists; skipping year=%s at s3://%s/%s", y, self.config.s3_processed_bucket, key)
             else:
                 remaining_years.append(y)
                 remaining_processed.append(key)
@@ -426,14 +430,14 @@ class CorporateAnnouncementsIngestor:
 
     def fetch_raw_data(self, source: str) -> pd.DataFrame:
         raw_key = self._raw_s3_object_key(self.config.announcements_raw_prefix, self.config.symbol, source, self.config.announcements_raw_filename)
-        logger.info("Reading RAW corporate announcements from s3://%s/%s", self.config.s3_bucket, raw_key)
+        logger.info("Reading RAW corporate announcements from s3://%s/%s", self.config.s3_raw_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
-            if not self.s3.exists(raw_key):
-                raise FileNotFoundError(f"RAW corporate announcements not found at s3://{self.config.s3_bucket}/{raw_key}")
+            if not self.s3_raw.exists(raw_key):
+                raise FileNotFoundError(f"RAW corporate announcements not found at s3://{self.config.s3_raw_bucket}/{raw_key}")
 
-            self.s3.download(raw_key, raw_local)
+            self.s3_raw.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
@@ -463,8 +467,8 @@ class CorporateAnnouncementsIngestor:
         logger.debug("Writing cleaned Corporate Announcements parquet to %s", out_path)
         clean_df.to_parquet(out_path, index=False)
 
-        self.s3.upload(out_path, processed_key)
-        logger.info("Uploaded processed corp announcements to s3://%s/%s", self.config.s3_bucket, processed_key)
+        self.s3_processed.upload(out_path, processed_key)
+        logger.info("Uploaded processed corp announcements to s3://%s/%s", self.config.s3_processed_bucket, processed_key)
 
     def run(self) -> None:
         logger.info("Starting Corporate Announcements ingestion for %s (%s-%s)", self.config.symbol, self.config.start_year, self.config.end_year)
@@ -472,7 +476,7 @@ class CorporateAnnouncementsIngestor:
         if self.config.start_year > self.config.end_year:
             raise ValueError("Start year cannot be after end year.")
 
-        for source in self.annoucements_sources:
+        for source in self.announcements_sources:
             logger.info("Processing source: %s", source)
 
             dtcol_name = self.dtcol_name_mapping.get(source.lower())
@@ -521,7 +525,8 @@ class FinancialResultsIngestor:
     """
     def __init__(self, config: IngestConfig, s3_client_factory: Callable[[str], S3Client] = S3Client):
         self.config = config
-        self.s3 = s3_client_factory(config.s3_bucket)
+        self.s3_raw = s3_client_factory(config.s3_raw_bucket)
+        self.s3_processed = s3_client_factory(config.s3_processed_bucket)
         self.dtcol_name = "filingdate"
         self.company_name = symbols_constants.SYMBOL_TO_COMPANY[config.symbol]
 
@@ -542,8 +547,8 @@ class FinancialResultsIngestor:
         remaining_years: List[int] = []
         remaining_processed: List[str] = []
         for y, key in zip(years, processed_keys):
-            if self.s3.exists(key):
-                logger.info("Financial Results exists; skipping year=%s at s3://%s/%s", y, self.config.s3_bucket, key)
+            if self.s3_processed.exists(key):
+                logger.info("Financial Results exists; skipping year=%s at s3://%s/%s", y, self.config.s3_processed_bucket, key)
             else:
                 remaining_years.append(y)
                 remaining_processed.append(key)
@@ -553,14 +558,14 @@ class FinancialResultsIngestor:
 
     def fetch_raw_data(self) -> pd.DataFrame:
         raw_key = self._raw_s3_object_key(self.config.results_raw_prefix, self.config.symbol, self.config.results_raw_filename)
-        logger.info("Reading RAW financial results from s3://%s/%s", self.config.s3_bucket, raw_key)
+        logger.info("Reading RAW financial results from s3://%s/%s", self.config.s3_raw_bucket, raw_key)
 
         with tempfile.TemporaryDirectory() as td:
             raw_local = os.path.join(td, f"{self.config.symbol}_raw.parquet")
-            if not self.s3.exists(raw_key):
-                raise FileNotFoundError(f"RAW financial results not found at s3://{self.config.s3_bucket}/{raw_key}")
+            if not self.s3_raw.exists(raw_key):
+                raise FileNotFoundError(f"RAW financial results not found at s3://{self.config.s3_raw_bucket}/{raw_key}")
 
-            self.s3.download(raw_key, raw_local)
+            self.s3_raw.download(raw_key, raw_local)
             raw_df = pd.read_parquet(raw_local)
 
             logger.info("Raw rows: %d", len(raw_df))
@@ -589,8 +594,8 @@ class FinancialResultsIngestor:
         logger.debug("Writing cleaned Financial Results parquet to %s", out_path)
         clean_df.to_parquet(out_path, index=False)
 
-        self.s3.upload(out_path, processed_key)
-        logger.info("Uploaded processed financial results to s3://%s/%s", self.config.s3_bucket, processed_key)
+        self.s3_processed.upload(out_path, processed_key)
+        logger.info("Uploaded processed financial results to s3://%s/%s", self.config.s3_processed_bucket, processed_key)
 
     def run(self) -> None:
         logger.info("Starting Financial Results ingestion for %s (%s-%s)", self.config.symbol, self.config.start_year, self.config.end_year)
@@ -673,7 +678,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--start", type=str, required=True, help="Start year YYYY")
     parser.add_argument("--end", type=str, required=True, help="End year YYYY")
     parser.add_argument("--local-output", type=str, default="/tmp/ingest.parquet", help="Local temp parquet stem")
-    parser.add_argument("--s3-bucket", type=str, default=storage_constants.S3_BUCKET, help="S3 bucket name")
+    parser.add_argument("--s3-raw-bucket", type=str, help="S3 bucket name for raw data")
+    parser.add_argument("--s3-processed-bucket", type=str, help="S3 bucket name for processed data")
     parser.add_argument("--ohlcv-only", action="store_true", help="Only ingest OHLCV.")
     parser.add_argument("--news-only", action="store_true", help="Only ingest news.")
     parser.add_argument("--corporate-announcements-only", action="store_true", help="Only ingest Corporate Announcements.")
@@ -721,7 +727,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         start_year=start_year,
         end_year=end_year,
         local_output=Path(args.local_output),
-        s3_bucket=args.s3_bucket,
+        s3_raw_bucket=args.s3_raw_bucket,
+        s3_processed_bucket=args.s3_processed_bucket
     )
 
     MultiModalIngestor(config).run(run_ohlcv=run_ohlcv, run_news=run_news, run_corp_ann=run_corp_ann, run_fin_results=run_fin_results, log_level=args.log_level)
