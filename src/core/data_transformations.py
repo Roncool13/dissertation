@@ -33,6 +33,7 @@ def aggregate_intraday_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     else:
         raise ValueError("No recognizable timestamp column in raw candles data")
 
+    ts = pd.to_datetime(ts, errors="coerce", utc=True).dt.tz_convert(None)  # parse robustly, drop timezone
     df = df.copy()
     df["ts"] = ts
     df["date"] = df["ts"].dt.date
