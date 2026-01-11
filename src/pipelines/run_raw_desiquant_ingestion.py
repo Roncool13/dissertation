@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Local imports
 from src.config import setup_logging
-import src.constants.storage as storage_constants
 from src.core.data_download import (
     DesiquantCandlesMirror,
     DesiquantNewsMirror,
@@ -43,10 +42,10 @@ class RawDesiquantIngestor:
 
     def __init__(self, config: RawDesiquantConfig):
         self.config = config
-        self.candles_mirror = DesiquantCandlesMirror()
-        self.news_mirror = DesiquantNewsMirror()
-        self.announcements_mirror = DesiquantCorporateAnnouncementsMirror()
-        self.financials_mirror = DesiquantFinancialResultsMirror()
+        self.candles_mirror = DesiquantCandlesMirror(raw_bucket=self.config.AWS_BUCKET_NAME)
+        self.news_mirror = DesiquantNewsMirror(raw_bucket=self.config.AWS_BUCKET_NAME)
+        self.announcements_mirror = DesiquantCorporateAnnouncementsMirror(raw_bucket=self.config.AWS_BUCKET_NAME)
+        self.financials_mirror = DesiquantFinancialResultsMirror(raw_bucket=self.config.AWS_BUCKET_NAME)
 
     def run(self) -> None:
         setup_logging(self.config.log_level)
@@ -74,7 +73,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--s3-bucket",
         type=str,
-        default=storage_constants.S3_BUCKET_RAW,
         help="Target S3 bucket for raw data (defaults to storage_constants.S3_BUCKET_RAW)",
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite if object already exists in S3.")
