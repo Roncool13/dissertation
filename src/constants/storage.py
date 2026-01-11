@@ -1,4 +1,10 @@
-# Default S3 Bucket and Prefix for OHLCV Data Storage
+# S3 Bucket Names
+S3_BUCKET_RAW = "dissertation-databucket-raw"
+S3_BUCKET_PROCESSED = "dissertation-databucket-processed"
+S3_BUCKET_FEATURES = "dissertation-databucket-features"
+S3_BUCKET_DVCSTORE = "dissertation-databucket-dvcstore"
+
+# Default S3 Prefix for OHLCV Data Storage
 S3_BUCKET = "dissertation-databucket"
 OHLCV_S3_PREFIX = "ohlcv"
 NEWS_S3_PREFIX = "news"
@@ -34,3 +40,4 @@ PROCESSED_FIN_RESULTS_FILENAME = "financial_results_processed.parquet"
 # Feature-store-zone data prefixes
 FEATURE_STORE_OHLCV_PREFIX = f"{PROCESSED_S3_PREFIX}/features"
 FEATURE_STORE_OHLCV_FILENAME = "ohlcv_features.parquet"
+FEATURE_STORE_OHLCV_METADATA_FILENAME = "ohlcv_feature_metadata.json"
