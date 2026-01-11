@@ -31,6 +31,6 @@ PROCESSED_CORP_ANN_FILENAME = "corporate_announcements_processed.parquet"
 PROCESSED_FIN_RESULTS_FILENAME = "financial_results_processed.parquet"
 
 # Feature-store-zone data prefixes
-FEATURE_STORE_OHLCV_PREFIX = f"{PROCESSED_S3_PREFIX}/features"
+FEATURE_STORE_OHLCV_PREFIX = "features"
 FEATURE_STORE_OHLCV_FILENAME = "ohlcv_features.parquet"
 FEATURE_STORE_OHLCV_METADATA_FILENAME = "ohlcv_feature_metadata.json"
