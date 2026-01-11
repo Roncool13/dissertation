@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 class _BaseDesiquantMirror(ABC):
     """Shared helpers for Desiquant mirroring to raw S3."""
 
-    def __init__(self, raw_prefix: str, raw_filename: str, desiquant_bucket: str, logger_label: str):
+    def __init__(self, raw_prefix: str, raw_filename: str, raw_bucket: str, desiquant_bucket: str, logger_label: str):
         self.storage_constants = storage_constants
         self.desiquant_constants = desiquant_constants
-        self.raw_bucket = storage_constants.S3_BUCKET
+        self.raw_bucket = raw_bucket
         self.raw_prefix = raw_prefix
         self.raw_filename = raw_filename
         self.desiquant_bucket = desiquant_bucket
@@ -82,10 +82,11 @@ class _BaseDesiquantMirror(ABC):
 class DesiquantCandlesMirror(_BaseDesiquantMirror):
     """Handles download of Desiquant candles and mirroring to the raw S3 zone."""
 
-    def __init__(self):
+    def __init__(self, raw_bucket: str):
         super().__init__(
             raw_prefix=storage_constants.RAW_DESIQUANT_OHLCV_PREFIX,
             raw_filename=storage_constants.RAW_OHLCV_FILENAME,
+            raw_bucket=raw_bucket,
             desiquant_bucket=desiquant_constants.DESIQUANT_CANDLES_BUCKET,
             logger_label="Candles",
         )
@@ -130,10 +131,11 @@ class DesiquantCandlesMirror(_BaseDesiquantMirror):
 class DesiquantNewsMirror(_BaseDesiquantMirror):
     """Handles download of Desiquant news and mirroring to the raw S3 zone."""
 
-    def __init__(self):
+    def __init__(self, raw_bucket: str):
         super().__init__(
             raw_prefix=storage_constants.RAW_DESIQUANT_NEWS_PREFIX,
             raw_filename=storage_constants.RAW_NEWS_FILENAME,
+            raw_bucket=raw_bucket,
             desiquant_bucket=desiquant_constants.DESIQUANT_NEWS_BUCKET,
             logger_label="News",
         )
@@ -174,10 +176,11 @@ class DesiquantNewsMirror(_BaseDesiquantMirror):
 class DesiquantFinancialResultsMirror(_BaseDesiquantMirror):
     """Handles download of Desiquant financial results and mirroring to the raw S3 zone."""
 
-    def __init__(self):
+    def __init__(self, raw_bucket: str):
         super().__init__(
             raw_prefix=storage_constants.RAW_DESIQUANT_FIN_RESULTS_PREFIX,
             raw_filename=storage_constants.RAW_FIN_RESULTS_FILENAME,
+            raw_bucket=raw_bucket,
             desiquant_bucket=desiquant_constants.DESIQUANT_FINANCIAL_RESULTS_BUCKET,
             logger_label="Financial Results",
         )
@@ -219,10 +222,11 @@ class DesiquantFinancialResultsMirror(_BaseDesiquantMirror):
 class DesiquantCorporateAnnouncementsMirror(_BaseDesiquantMirror):
     """Handles download of Desiquant corporate announcements and mirroring to the raw S3 zone."""
 
-    def __init__(self):
+    def __init__(self, raw_bucket: str):
         super().__init__(
             raw_prefix=storage_constants.RAW_DESIQUANT_CORP_ANN_PREFIX,
             raw_filename=storage_constants.RAW_CORP_ANN_FILENAME,
+            raw_bucket=raw_bucket,
             desiquant_bucket=desiquant_constants.DESIQUANT_CORP_ANNOUNCEMENTS_BUCKET,
             logger_label="Corporate Announcements",
         )
