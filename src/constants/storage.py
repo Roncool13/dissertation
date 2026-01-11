@@ -1,11 +1,4 @@
-# S3 Bucket Names
-S3_BUCKET_RAW = "dissertation-databucket-raw"
-S3_BUCKET_PROCESSED = "dissertation-databucket-processed"
-S3_BUCKET_FEATURES = "dissertation-databucket-features"
-S3_BUCKET_DVCSTORE = "dissertation-databucket-dvcstore"
-
 # Default S3 Prefix for OHLCV Data Storage
-S3_BUCKET = "dissertation-databucket"
 OHLCV_S3_PREFIX = "ohlcv"
 NEWS_S3_PREFIX = "news"
 NEWS_CLEAN_S3_PREFIX = "news_clean"
