@@ -28,7 +28,7 @@ jobs:
       contents: read
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      S3_BUCKET: ${{ secrets.DIS_S3_BUCKET }}
+      S3_BUCKET: ${{ secrets.DIS_S3_RAW_BUCKET }}
 
     steps:
       - name: Checkout repo
