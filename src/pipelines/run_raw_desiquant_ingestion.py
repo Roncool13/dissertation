@@ -87,8 +87,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
+    symbols = args.symbols
+    if len(symbols) == 1:
+        symbols = [s for s in symbols[0].replace(",", " ").split() if s]
     config = RawDesiquantConfig(
-        symbols=args.symbols,
+        symbols=symbols,
         AWS_BUCKET_NAME=args.s3_bucket,
         overwrite=args.overwrite,
         log_level=args.log_level,
