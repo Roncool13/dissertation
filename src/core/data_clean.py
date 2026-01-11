@@ -33,7 +33,11 @@ def clean_ohlcv_data(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
     # Correct dtypes
     logger.debug("Converting OHLCV date column to datetime")
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = (
+        pd.to_datetime(df["date"], errors="coerce", utc=True)   # parse robustly
+        .dt.tz_convert(None)                                  # drop timezone (UTC -> naive)
+        .dt.normalize()                                       # 00:00:00 (daily key)
+    )
     for col in ["open", "high", "low", "close", "volume"]:
         logger.debug("Converting column %s to numeric", col)
         df[col] = pd.to_numeric(df[col], errors="coerce")
