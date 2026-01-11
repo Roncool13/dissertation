@@ -74,8 +74,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--s3-bucket",
         type=str,
-        default=storage_constants.S3_BUCKET,
-        help="Target S3 bucket for raw data (defaults to storage_constants.S3_BUCKET)",
+        default=storage_constants.S3_BUCKET_RAW,
+        help="Target S3 bucket for raw data (defaults to storage_constants.S3_BUCKET_RAW)",
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite if object already exists in S3.")
     parser.add_argument(
