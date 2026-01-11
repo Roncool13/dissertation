@@ -1,4 +1,4 @@
-name: Data Ingestion – OHLCV + News + Corporate Announcements + Financial Results
+name: Processed Data Ingestion – OHLCV + News + Corporate Announcements + Financial Results
 
 on:
   workflow_dispatch:
@@ -65,7 +65,8 @@ jobs:
 
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      S3_BUCKET: ${{ secrets.DIS_S3_BUCKET }}
+      S3_RAW_BUCKET: ${{ secrets.DIS_S3_RAW_BUCKET }}
+      S3_PROCESSED_BUCKET: ${{ secrets.DIS_S3_PROCESSED_BUCKET }}
 
     steps:
       - name: Checkout repo
@@ -91,12 +92,13 @@ jobs:
         env:
           PYTHONUNBUFFERED: 1
         run: |
-          CMD="python src/pipelines/run_data_ingestion.py \
+          CMD="python src/pipelines/run_processed_data_ingestion.py \
             --symbol '${{ inputs.symbol }}' \
             --start '${{ inputs.start }}' \
             --end '${{ inputs.end }}' \
             --local-output '${{ inputs.local_output }}' \
-            --s3-bucket '$S3_BUCKET' \
+            --s3-raw-bucket '$S3_RAW_BUCKET' \
+            --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
             --log-level '${{ inputs.log_level }}'"
 
           if [ "${{ inputs.ingest_ohlcv }}" = "false" ] && [ "${{ inputs.ingest_news }}" = "true" ] && [ "${{ inputs.ingest_corporate_announcements }}" = "false" ] && [ "${{ inputs.ingest_financial_results }}" = "false" ]; then
