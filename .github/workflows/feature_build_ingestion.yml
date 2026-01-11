@@ -18,6 +18,12 @@ on:
         required: true
         type: string
 
+      horizon_days:
+        description: "Horizon days for feature calculation"
+        required: false
+        default: "5"
+        type: string
+
       log_level:
         description: "Logging level (e.g. INFO, DEBUG)"
         required: false
@@ -35,7 +41,8 @@ jobs:
 
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      S3_BUCKET: ${{ secrets.DIS_S3_BUCKET }}
+      S3_PROCESSED_BUCKET: ${{ secrets.DIS_S3_PROCESSED_BUCKET }}
+      S3_FEATURES_BUCKET: ${{ secrets.DIS_S3_FEATURES_BUCKET }}
 
     steps:
       - name: Checkout repo
@@ -65,7 +72,9 @@ jobs:
             --symbols '${{ inputs.symbols }}' \
             --start '${{ inputs.start }}' \
             --end '${{ inputs.end }}' \
-            --s3-bucket '$S3_BUCKET' \
+            --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
+            --s3-features-bucket '$S3_FEATURES_BUCKET' \
+            --horizon-days '${{ inputs.horizon_days }}' \
             --log-level '${{ inputs.log_level }}'"
 
             echo "Running command: $CMD"
