@@ -1,4 +1,4 @@
-name: Feature Build Ingestion – OHLCV Technical Indicators
+name: Feature Build Ingestion – OHLCV Technical Indicators + DVC Track
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
 
     permissions:
       id-token: write   # required for OIDC
-      contents: read
+      contents: write  # required to push DVC pointers to S3
 
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
@@ -47,6 +47,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -57,6 +59,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install "dvc[s3]"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -64,7 +67,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Run ingestion
+      - name: Run feature build ingestion
         env:
           PYTHONUNBUFFERED: 1
         run: |
@@ -79,3 +82,29 @@ jobs:
 
             echo "Running command: $CMD"
             eval "$CMD"
+
+      - name: DVC track dataset artifacts
+        run: |
+          dvc add data/features/ohlcv_features.parquet
+          dvc add data/features/ohlcv_feature_metadata.json
+
+      - name: Commit DVC pointers
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add \
+            data/features/ohlcv_features.parquet.dvc \
+            data/features/ohlcv_feature_metadata.json.dvc \
+            dvc.lock \
+            .gitignore
+
+          git commit -m "DVC: update OHLCV features (${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
+
+      - name: Push dataset to DVC remote
+        run: |
+          dvc push
+
+      - name: Push git commit (pointers)
+        run: |
+          git push
