@@ -19,12 +19,10 @@ import sys
 import argparse
 import logging
 import tempfile
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List
-from dataclasses import dataclass, field
-from typing import List
 import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, List
 
 # Third-party imports
 import numpy as np
@@ -77,6 +75,7 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     Adds a compact set of indicators commonly used for next-day direction models.
     Works per-symbol.
     """
+    logger.debug("Adding technical indicators to %d rows", len(df))
     g = df.copy()
     g.sort_values(["symbol", "date"], inplace=True)
 
@@ -129,6 +128,7 @@ def add_lagged_features(
     base_cols: List[str],
     lags: List[int],
 ) -> pd.DataFrame:
+    logger.debug("Adding lagged features for %d columns with lags %s", len(base_cols), lags)
     g = df.copy()
     g.sort_values(["symbol", "date"], inplace=True)
 
@@ -145,6 +145,7 @@ def add_forward_labels(
     df: pd.DataFrame,
     horizon_days: int,
 ) -> pd.DataFrame:
+    logger.debug("Adding forward labels with horizon %d days", horizon_days)
     g = df.copy()
     g.sort_values(["symbol", "date"], inplace=True)
 
@@ -202,103 +203,24 @@ class OhlcvFeatureBuildIngestor:
     def _output_key(self) -> str:
         return f"{self.cfg.output_key_prefix}/{self.cfg.output_filename}"
 
-    def _download_parquet(self, key: str, dst: Path) -> None:
-        # Minimal download helper (S3Connection currently only uploads; use boto3 client directly)
-        self.s3_processed.s3_client.download_file(self.cfg.processed_bucket, key, str(dst))
-    def _load_year(self, symbol: str, year: int) -> pd.DataFrame:
-        key = self._input_key(symbol, year)
-        if not self.s3_processed.object_exists(key):
-            logger.warning("Missing processed OHLCV: s3://%s/%s (skipping)", self.cfg.processed_bucket, key)
-            return pd.DataFrame()
-
+    def _write_local_and_s3(self, filename: str, s3_key: str, write_func: Callable[[Path], None]) -> None:
+        """Write artifact locally (for DVC) and upload the same temp file to S3."""
         with tempfile.TemporaryDirectory() as td:
-            local = Path(td) / f"{symbol}_{year}.parquet"
-            logger.info("Downloading %s -> %s", key, local)
-            self._download_parquet(key, local)
-            df = pd.read_parquet(local)
+            tmp_path = Path(td) / filename
+            logger.debug("Writing %s to temp path %s", filename, tmp_path)
+            write_func(tmp_path)
 
-        # Defensive schema normalization
-        expected = {"symbol", "date", "open", "high", "low", "close", "volume"}
-        missing = expected - set(df.columns)
-        if missing:
-            raise ValueError(f"Processed OHLCV missing columns {sorted(missing)} for {symbol} {year}: {list(df.columns)}")
+            local_dir = Path("data/features")
+            local_dir.mkdir(parents=True, exist_ok=True)
+            local_path = local_dir / filename
+            logger.debug("Writing %s to local DVC path %s", filename, local_path)
+            write_func(local_path)
 
-        df = df.copy()
-        df["date"] = pd.to_datetime(df["date"])
-        df["symbol"] = df["symbol"].astype(str)
+            logger.info("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
+            self.s3_features.upload_file(tmp_path, s3_key)
 
-        # Keep only requested year (in case file has extra)
-        df = df[(df["date"].dt.year == year)]
-        return df
-
-    def build(self) -> pd.DataFrame:
-        frames = []
-        for symbol in self.cfg.symbols:
-            for year in range(self.cfg.start_year, self.cfg.end_year + 1):
-                df_y = self._load_year(symbol, year)
-                if not df_y.empty:
-                    frames.append(df_y)
-
-        if not frames:
-            raise RuntimeError("No processed OHLCV found for the requested symbols/years.")
-
-        ohlcv = pd.concat(frames, ignore_index=True)
-        # Drop duplicates on (symbol,date) just in case
-        ohlcv.sort_values(["symbol", "date"], inplace=True)
-        ohlcv.drop_duplicates(subset=["symbol", "date"], keep="last", inplace=True)
-
-        feats = add_technical_indicators(ohlcv)
-
-        # NOTE: Feast expects event_timestamp column present and timezone-naive timestamps are OK.
-        # We keep "date" as timestamp (not date-only) to match typical Feast usage.
-        feats["date"] = pd.to_datetime(feats["date"])
-
-        # Lag base columns (only those present will be lagged)
-        lag_base_cols = [
-            "ret_1d", "log_ret_1d",
-            "rsi_14",
-            "macd", "macd_signal", "macd_hist",
-            "atr_14",
-            "volatility_20",
-            "sma_5", "sma_10", "sma_20",
-            "ema_12", "ema_26",
-            "hl_range", "oc_change", "oc_change_pct",
-        ]
-
-        feats = add_lagged_features(feats, base_cols=lag_base_cols, lags=self.cfg.lags)
-
-        if self.cfg.include_labels:
-            feats = add_forward_labels(feats, horizon_days=self.cfg.horizon_days)
-
-        # For model training, it's best to drop rows where rolling/lag/label created NaNs
-        # (Feast offline can store NaNs too, but training will drop them anyway.)
-        required = ["symbol", "date", "open", "high", "low", "close", "volume"]
-        if self.cfg.include_labels:
-            required += [f"y_up_{self.cfg.horizon_days}d", f"ret_fwd_{self.cfg.horizon_days}d"]
-        feats = feats.dropna(subset=[c for c in required if c in feats.columns])
-
-        return feats
-
-    def write_to_s3(self, feats: pd.DataFrame, output_path: str) -> None:
-        logger.info("Writing %s rows of features to s3://%s/%s", len(feats), self.cfg.features_bucket, output_path)
-        with tempfile.TemporaryDirectory() as td:
-            local = Path(td) / "ohlcv_features.parquet"
-            feats.to_parquet(local, index=False)
-            logger.info("Uploading features to s3://%s/%s", self.cfg.features_bucket, output_path)
-            self.s3_features.upload_file(local, output_path)
-        logger.info("Done. Wrote %s rows of features to s3://%s/%s", len(feats), self.cfg.features_bucket, output_path)
-
-    def write_metadata_to_s3(self, feats: pd.DataFrame) -> None:
-        if not self.cfg.write_metadata:
-            return
-
+    def _generate_metadata(self, feats: pd.DataFrame) -> dict:
         from datetime import datetime, timezone, date
-
-        # ---- Auto-generate default global time splits ----
-        # Rule:
-        #   test = last year
-        #   val  = year before test
-        #   train = everything before val
 
         test_year = self.cfg.end_year
         val_year = test_year - 1
@@ -311,6 +233,16 @@ class OhlcvFeatureBuildIngestor:
 
         test_start = date(test_year, 1, 1)
         test_end = date(test_year, 12, 31)
+
+        logger.debug(
+            "Computed split windows -> train:%s-%s val:%s-%s test:%s-%s",
+            train_start,
+            train_end,
+            val_start,
+            val_end,
+            test_start,
+            test_end,
+        )
 
         splits = {
             "scheme": "global_time_split_v1",
@@ -340,14 +272,136 @@ class OhlcvFeatureBuildIngestor:
             "splits": splits,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
         }
+        logger.debug(
+            "Metadata snapshot -> rows:%d columns:%d include_labels:%s",
+            meta["row_count"],
+            len(meta["columns"]),
+            self.cfg.include_labels,
+        )
+        return meta
 
+    def _download_parquet(self, key: str, dst: Path) -> None:
+        # Minimal download helper (S3Connection currently only uploads; use boto3 client directly)
+        logger.debug("Downloading s3://%s/%s to %s", self.cfg.processed_bucket, key, dst)
+        self.s3_processed.s3_client.download_file(self.cfg.processed_bucket, key, str(dst))
+    def _load_year(self, symbol: str, year: int) -> pd.DataFrame:
+        logger.debug("Loading processed OHLCV for %s %s", symbol, year)
+        key = self._input_key(symbol, year)
+        if not self.s3_processed.object_exists(key):
+            logger.warning("Missing processed OHLCV: s3://%s/%s (skipping)", self.cfg.processed_bucket, key)
+            return pd.DataFrame()
+
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / f"{symbol}_{year}.parquet"
+            logger.info("Downloading %s -> %s", key, local)
+            self._download_parquet(key, local)
+            df = pd.read_parquet(local)
+            logger.debug("Loaded %d rows for %s %s", len(df), symbol, year)
+
+        # Defensive schema normalization
+        expected = {"symbol", "date", "open", "high", "low", "close", "volume"}
+        missing = expected - set(df.columns)
+        if missing:
+            raise ValueError(f"Processed OHLCV missing columns {sorted(missing)} for {symbol} {year}: {list(df.columns)}")
+
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df["symbol"] = df["symbol"].astype(str)
+
+        # Keep only requested year (in case file has extra)
+        df = df[(df["date"].dt.year == year)]
+        logger.debug("Filtered to %d rows for %s %s after year trim", len(df), symbol, year)
+        return df
+
+    def build(self) -> pd.DataFrame:
+        logger.info(
+            "Building OHLCV features for symbols=%s across years %s-%s",
+            self.cfg.symbols,
+            self.cfg.start_year,
+            self.cfg.end_year,
+        )
+        frames = []
+        for symbol in self.cfg.symbols:
+            for year in range(self.cfg.start_year, self.cfg.end_year + 1):
+                df_y = self._load_year(symbol, year)
+                if not df_y.empty:
+                    logger.debug("Appending %d rows for %s %s", len(df_y), symbol, year)
+                    frames.append(df_y)
+
+        if not frames:
+            raise RuntimeError("No processed OHLCV found for the requested symbols/years.")
+
+        ohlcv = pd.concat(frames, ignore_index=True)
+        logger.info("Concatenated %d total OHLCV rows before indicator build", len(ohlcv))
+        # Drop duplicates on (symbol,date) just in case
+        ohlcv.sort_values(["symbol", "date"], inplace=True)
+        ohlcv.drop_duplicates(subset=["symbol", "date"], keep="last", inplace=True)
+        logger.debug("Post-dedup OHLCV rows: %d", len(ohlcv))
+
+        feats = add_technical_indicators(ohlcv)
+        logger.debug("Feature frame after indicators: %s", feats.shape)
+
+        # NOTE: Feast expects event_timestamp column present and timezone-naive timestamps are OK.
+        # We keep "date" as timestamp (not date-only) to match typical Feast usage.
+        feats["date"] = pd.to_datetime(feats["date"])
+
+        # Lag base columns (only those present will be lagged)
+        lag_base_cols = [
+            "ret_1d", "log_ret_1d",
+            "rsi_14",
+            "macd", "macd_signal", "macd_hist",
+            "atr_14",
+            "volatility_20",
+            "sma_5", "sma_10", "sma_20",
+            "ema_12", "ema_26",
+            "hl_range", "oc_change", "oc_change_pct",
+        ]
+
+        feats = add_lagged_features(feats, base_cols=lag_base_cols, lags=self.cfg.lags)
+        logger.debug("Feature frame after lags: %s", feats.shape)
+
+        if self.cfg.include_labels:
+            feats = add_forward_labels(feats, horizon_days=self.cfg.horizon_days)
+            logger.debug("Feature frame after labels: %s", feats.shape)
+
+        # For model training, it's best to drop rows where rolling/lag/label created NaNs
+        # (Feast offline can store NaNs too, but training will drop them anyway.)
+        required = ["symbol", "date", "open", "high", "low", "close", "volume"]
+        if self.cfg.include_labels:
+            required += [f"y_up_{self.cfg.horizon_days}d", f"ret_fwd_{self.cfg.horizon_days}d"]
+        feats = feats.dropna(subset=[c for c in required if c in feats.columns])
+        logger.info("Final feature frame has %d rows and %d columns", *feats.shape)
+
+        return feats
+
+    def write_to_s3(self, feats: pd.DataFrame, output_path: str) -> None:
+        logger.info("Writing %s rows of features to s3://%s/%s", len(feats), self.cfg.features_bucket, output_path)
+        self._write_local_and_s3(
+            filename=self.cfg.output_filename,
+            s3_key=output_path,
+            write_func=lambda path: feats.to_parquet(path, index=False),
+        )
+        logger.info("Done. Wrote %s rows of features to s3://%s/%s", len(feats), self.cfg.features_bucket, output_path)
+
+    def write_metadata_to_s3(self, feats: pd.DataFrame) -> None:
+        if not self.cfg.write_metadata:
+            logger.info("Skipping metadata write (write_metadata disabled)")
+            return
+
+        meta = self._generate_metadata(feats)
         key = f"{self.cfg.output_key_prefix}/{self.cfg.metadata_filename}"
 
         logger.info("Writing metadata JSON to s3://%s/%s", self.cfg.features_bucket, key)
-        with tempfile.TemporaryDirectory() as td:
-            local = Path(td) / self.cfg.metadata_filename
-            local.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-            self.s3_features.upload_file(local, key)
+        payload = json.dumps(meta, indent=2)
+
+        def _write_json(path: Path) -> None:
+            path.write_text(payload, encoding="utf-8")
+
+        self._write_local_and_s3(
+            filename=self.cfg.metadata_filename,
+            s3_key=key,
+            write_func=_write_json,
+        )
         logger.info("Done. Wrote metadata to s3://%s/%s", self.cfg.features_bucket, key)
 
     def run(self) -> None:
