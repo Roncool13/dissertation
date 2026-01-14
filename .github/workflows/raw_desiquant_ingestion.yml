@@ -55,7 +55,7 @@ jobs:
           PYTHONUNBUFFERED: 1
         run: |
           CMD="python src/pipelines/run_raw_desiquant_ingestion.py \
-            --symbols '${{ inputs.symbols }}' \
+            --symbols ${{ inputs.symbols }} \
             --s3-bucket '$S3_BUCKET' \
             --log-level '${{ inputs.log_level }}'"
 
