@@ -420,9 +420,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--start-year", type=int, required=True)
     p.add_argument("--end-year", type=int, required=True)
     p.add_argument("--s3-processed-bucket", required=True,
-                help="Your S3 processed bucket (e.g., dissertation-databucket)")
+                help="Your S3 processed bucket (e.g., dissertation-databucket-processed)")
     p.add_argument("--s3-features-bucket", required=True,
-                help="Your S3 features bucket (e.g., dissertation-databucket)")
+                help="Your S3 features bucket (e.g., dissertation-databucket-dvcstore)")
     p.add_argument("--horizon-days", type=int, default=5)
     p.add_argument("--lags", type=str, default="1,2,3,5", help="Comma-separated lags")
     p.add_argument("--include-labels", action="store_true", default=True)
