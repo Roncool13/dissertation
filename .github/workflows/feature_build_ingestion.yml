@@ -73,8 +73,8 @@ jobs:
         run: |
           CMD="python src/pipelines/run_feature_build_ingestion.py \
             --symbols '${{ inputs.symbols }}' \
-            --start '${{ inputs.start }}' \
-            --end '${{ inputs.end }}' \
+            --start-year '${{ inputs.start }}' \
+            --end-year '${{ inputs.end }}' \
             --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
             --s3-features-bucket '$S3_FEATURES_BUCKET' \
             --horizon-days '${{ inputs.horizon_days }}' \
