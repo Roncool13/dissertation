@@ -88,8 +88,8 @@ jobs:
             --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
             --s3-features-bucket '$S3_FEATURES_BUCKET' \
             --score-mode '${{ inputs.score_mode }}' \
-            --batch-size 16 \
-            --max-length 128 \
+            --finbert-batch-size 16 \
+            --finbert-max-length 128 \
             --log-level '${{ inputs.log_level }}'"
 
             echo "Running command: $CMD"
