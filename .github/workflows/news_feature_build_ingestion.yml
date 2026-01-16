@@ -20,12 +20,6 @@ on:
         required: true
         type: string
 
-      horizon_days:
-        description: "Horizon days for feature calculation"
-        required: false
-        default: "5"
-        type: string
-
       score_mode:
         description: "Scoring mode (e.g. finbert, skip)"
         required: false
