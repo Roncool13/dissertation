@@ -1,0 +1,127 @@
+# Example job step snippet to add into your existing ingestion workflow
+# (runs AFTER processed NEWS exists)
+name: News Feature Build Ingestion – NEWS Sentiment Features + DVC Track
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated NSE symbols to ingest (e.g. TCS,INFY,RELIANCE)"
+        required: true
+        type: string
+
+      start:
+        description: "Start year (YYYY)"
+        required: true
+        type: string
+
+      end:
+        description: "End year (YYYY)"
+        required: true
+        type: string
+
+      horizon_days:
+        description: "Horizon days for feature calculation"
+        required: false
+        default: "5"
+        type: string
+
+      score_mode:
+        description: "Scoring mode (e.g. finbert, skip)"
+        required: false
+        default: "finbert"
+        type: string
+
+      log_level:
+        description: "Logging level (e.g. INFO, DEBUG)"
+        required: false
+        default: "INFO"
+        type: string
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    environment: production
+
+    permissions:
+      id-token: write   # required for OIDC
+      contents: write  # required to push DVC pointers to S3
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_PROCESSED_BUCKET: ${{ secrets.DIS_S3_PROCESSED_BUCKET }}
+      S3_FEATURES_BUCKET: ${{ secrets.DIS_S3_FEATURES_BUCKET }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "dvc[s3]"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Build NEWS sentiment features (FinBERT)
+        env:
+          PYTHONUNBUFFERED: 1
+        run: |
+          CMD="python -m src.pipelines.run_news_feature_build_ingestion \
+            --symbols '${{ inputs.symbols }}' \
+            --start-year '${{ inputs.start }}' \
+            --end-year '${{ inputs.end }}' \
+            --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
+            --s3-features-bucket '$S3_FEATURES_BUCKET' \
+            --score-mode '${{ inputs.score_mode }}' \
+            --batch-size 16 \
+            --max-length 128 \
+            --log-level '${{ inputs.log_level }}'"
+
+            echo "Running command: $CMD"
+            eval "$CMD"
+
+      - name: DVC track dataset artifacts
+        run: |
+          dvc add data/features/news_sentiment_features.parquet
+          dvc add data/features/news_sentiment_feature_metadata.json
+
+      - name: Commit DVC pointers
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add \
+            data/features/news_sentiment_features.parquet.dvc \
+            data/features/news_sentiment_feature_metadata.json.dvc \
+            .gitignore
+
+          git commit -m "DVC: update NEWS sentiment features (${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
+
+      - name: Push dataset to DVC remote
+        run: |
+          dvc push
+
+      - name: Push git commit (pointers)
+        run: |
+          git push
