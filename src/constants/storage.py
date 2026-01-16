@@ -34,3 +34,7 @@ PROCESSED_FIN_RESULTS_FILENAME = "financial_results_processed.parquet"
 FEATURE_STORE_OHLCV_PREFIX = "features"
 FEATURE_STORE_OHLCV_FILENAME = "ohlcv_features.parquet"
 FEATURE_STORE_OHLCV_METADATA_FILENAME = "ohlcv_feature_metadata.json"
+
+FEATURE_STORE_NEWS_PREFIX = "features"
+FEATURE_STORE_NEWS_FILENAME = "news_sentiment_features.parquet"
+FEATURE_STORE_NEWS_METADATA_FILENAME = "news_sentiment_feature_metadata.json"
