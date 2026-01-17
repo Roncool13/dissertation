@@ -98,7 +98,7 @@ jobs:
             data/features/ohlcv_feature_metadata.json.dvc \
             .gitignore
 
-          git commit -m "DVC: update OHLCV features (${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
+          git commit -m "DVC: update OHLCV features (${{ inputs.symbols }}-${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
 
       - name: Push dataset to DVC remote
         run: |
