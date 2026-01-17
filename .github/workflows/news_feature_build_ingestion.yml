@@ -51,6 +51,8 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION }}
       S3_PROCESSED_BUCKET: ${{ secrets.DIS_S3_PROCESSED_BUCKET }}
       S3_FEATURES_BUCKET: ${{ secrets.DIS_S3_FEATURES_BUCKET }}
+      # Avoid HF symlink-related issues on CI filesystems
+      HF_HUB_DISABLE_SYMLINKS: "1"
 
     steps:
       - name: Checkout repo
@@ -69,20 +71,17 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Cache pip + HuggingFace + torch
+      - name: Cache pip + torch
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/pip
-            ~/.cache/huggingface
             ~/.cache/torch
           key: cache-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies (CPU torch)
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
-          HF_HOME: ~/.cache/huggingface
-          TRANSFORMERS_CACHE: ~/.cache/huggingface
         run: |
           python -m pip install --upgrade pip
           # Force CPU wheel for GitHub Actions runners (faster + more reliable)
@@ -93,23 +92,21 @@ jobs:
       - name: Build NEWS sentiment features (FinBERT)
         env:
           PYTHONUNBUFFERED: 1
-          HF_HOME: ~/.cache/huggingface
-          TRANSFORMERS_CACHE: ~/.cache/huggingface
+          # Use a per-run HF cache to prevent partial restores causing missing blobs
+          HF_HOME: ${{ runner.temp }}/hf
         run: |
-          CMD="python -m src.pipelines.run_news_feature_build_ingestion \
+          mkdir -p "$HF_HOME"
+          python -m src.pipelines.run_news_feature_build_ingestion \
             --symbols '${{ inputs.symbols }}' \
             --start-year '${{ inputs.start }}' \
             --end-year '${{ inputs.end }}' \
-            --s3-processed-bucket '$S3_PROCESSED_BUCKET' \
-            --s3-features-bucket '$S3_FEATURES_BUCKET' \
+            --s3-processed-bucket "$S3_PROCESSED_BUCKET" \
+            --s3-features-bucket "$S3_FEATURES_BUCKET" \
             --score-mode '${{ inputs.score_mode }}' \
             --finbert-batch-size 16 \
             --finbert-max-length 128 \
             --horizon-days '${{ inputs.horizon_days }}' \
-            --log-level '${{ inputs.log_level }}'"
-
-            echo "Running command: $CMD"
-            eval "$CMD"
+            --log-level '${{ inputs.log_level }}'
 
       - name: DVC track dataset artifacts
         run: |
