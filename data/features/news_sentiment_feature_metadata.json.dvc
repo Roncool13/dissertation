@@ -1,0 +1,5 @@
+outs:
+- md5: 1a3cc45baa983b2884f88a86649bb275
+  size: 1633
+  hash: md5
+  path: news_sentiment_feature_metadata.json
