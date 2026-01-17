@@ -400,8 +400,8 @@ class NewsSentimentFeatureBuildIngestor:
         logger.debug(
             "Metadata snapshot -> rows:%d columns:%d include_labels:%s",
             meta["row_count"],
-            len(meta["columns"]),
-            self.cfg.include_labels,
+            len(meta["feature_columns"]),
+            self.cfg.label_col_name,
         )
         return meta
 
