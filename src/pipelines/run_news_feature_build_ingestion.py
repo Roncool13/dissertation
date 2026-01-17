@@ -473,7 +473,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--finbert-batch-size", type=int, default=16)
     p.add_argument("--finbert-max-length", type=int, default=128)
     p.add_argument("--finbert-device", type=int, default=-1)
-    p.add_argument("--target-horizon-days", type=int, default=5)
+    p.add_argument("--horizon-days", type=int, default=5)
 
     p.add_argument("--lags", type=int, default=5)
 
@@ -501,8 +501,8 @@ def main() -> None:
         finbert_max_length=args.finbert_max_length,
         finbert_device=args.finbert_device,
         lags=args.lags,
-        target_horizon_days=args.target_horizon_days,
-        label_col_name=f"y_up_{args.target_horizon_days}d",
+        target_horizon_days=args.horizon_days,
+        label_col_name=f"y_up_{args.horizon_days}d",
     )
 
     NewsSentimentFeatureBuildIngestor(cfg).run()
