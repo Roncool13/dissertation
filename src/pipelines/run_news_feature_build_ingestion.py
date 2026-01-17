@@ -259,10 +259,11 @@ class NewsSentimentFeatureBuildIngestor:
                 return float(np.nan)
             return float((x * w).sum() / denom)
 
-        grp = d.groupby(["symbol", "date"], as_index=False)
+        # Weighted polarity mean (make sure apply returns a Series)
+        grp_w = d.groupby(["symbol", "date"], sort=False)
 
         # Daily aggregates
-        out = grp.agg(
+        out = grp_w.agg(
             article_count=("headline", "count"),
             pos_count=("is_pos", "sum"),
             neg_count=("is_neg", "sum"),
@@ -274,8 +275,13 @@ class NewsSentimentFeatureBuildIngestor:
         )
 
         # Weighted polarity mean
-        wp = grp.apply(lambda g: wmean(g["polarity"], g["w"])).reset_index(name="polarity_wmean")
-        out = out.merge(wp[["symbol", "date", "polarity_wmean"]], on=["symbol", "date"], how="left")
+        # wp = grp.apply(lambda g: wmean(g["polarity"], g["w"])).reset_index(name="polarity_wmean")
+        # out = out.merge(wp[["symbol", "date", "polarity_wmean"]], on=["symbol", "date"], how="left")
+
+        wp = grp_w.apply(lambda g: wmean(g["polarity"], g["w"]))  # Series
+        wp = wp.rename("polarity_wmean").reset_index()           # ok in all pandas
+
+        out = out.merge(wp, on=["symbol", "date"], how="left")
 
         # Ratios
         out["pos_ratio"] = out["pos_count"] / out["article_count"].replace(0, np.nan)
