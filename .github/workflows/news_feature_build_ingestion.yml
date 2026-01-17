@@ -57,29 +57,38 @@ jobs:
         with:
           python-version: "3.12.12"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install "dvc[s3]"
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Cache HuggingFace models
+      - name: Cache pip + HuggingFace + torch
         uses: actions/cache@v4
         with:
           path: |
+            ~/.cache/pip
             ~/.cache/huggingface
             ~/.cache/torch
-          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          key: cache-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies (CPU torch)
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          HF_HOME: ~/.cache/huggingface
+          TRANSFORMERS_CACHE: ~/.cache/huggingface
+        run: |
+          python -m pip install --upgrade pip
+          # Force CPU wheel for GitHub Actions runners (faster + more reliable)
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install "dvc[s3]"
 
       - name: Build NEWS sentiment features (FinBERT)
         env:
           PYTHONUNBUFFERED: 1
+          HF_HOME: ~/.cache/huggingface
+          TRANSFORMERS_CACHE: ~/.cache/huggingface
         run: |
           CMD="python -m src.pipelines.run_news_feature_build_ingestion \
             --symbols '${{ inputs.symbols }}' \
