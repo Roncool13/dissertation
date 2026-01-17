@@ -8,6 +8,6 @@ pyarrow
 scikit-learn
 s3fs>=2023.12.2
 sentence-transformers>=2.2.2
-torch
+# torch installed per-environment (CI/Colab) to control CPU vs CUDA wheel
 tqdm
 yfinance
