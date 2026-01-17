@@ -16,8 +16,10 @@ Note:
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 
@@ -30,6 +32,87 @@ class FinBertConfig:
     batch_size: int = 16
     max_length: int = 128
     device: int = -1  # -1 CPU, 0 GPU
+
+
+def _candidate_model_cache_dirs(model_name: str) -> List[str]:
+    """Return candidate on-disk cache dirs for a HF model.
+
+    HF cache layouts vary slightly by version/config. We try the common ones.
+    """
+
+    # Example model_name: "ProsusAI/finbert" -> "models--ProsusAI--finbert"
+    parts = model_name.split("/")
+    if len(parts) == 2:
+        org, repo = parts
+        cache_leaf = f"models--{org}--{repo}"
+    else:
+        cache_leaf = "models--" + "--".join(parts)
+
+    hf_home = os.environ.get("HF_HOME")
+    if not hf_home:
+        hf_home = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+
+    # Newer layout puts everything under HF_HOME/hub
+    return [
+        os.path.join(hf_home, "hub", cache_leaf),
+        os.path.join(hf_home, cache_leaf),
+    ]
+
+
+def _load_finbert_pipeline(cfg: FinBertConfig):
+    """Load FinBERT with a cache-safe fallback.
+
+    Strategy:
+      1) Try normal load (uses cache, downloads missing files if needed).
+      2) If we hit a missing-file error (common in CI restored caches),
+         delete ONLY the FinBERT cache entry and force re-download.
+    """
+
+    try:
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
+    except Exception as e:
+        raise ImportError(
+            "transformers is required for FinBERT scoring. Install: pip install transformers"
+        ) from e
+
+    # Optional exception type (depends on huggingface_hub version)
+    try:
+        from huggingface_hub.utils import LocalEntryNotFoundError  # type: ignore
+    except Exception:  # pragma: no cover
+        LocalEntryNotFoundError = ()  # type: ignore
+
+    def _create(force: bool):
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg.model_name,
+            local_files_only=False,
+            resume_download=True,
+            force_download=force,
+        )
+        model = AutoModelForSequenceClassification.from_pretrained(
+            cfg.model_name,
+            local_files_only=False,
+            resume_download=True,
+            force_download=force,
+        )
+        return pipeline(
+            task="text-classification",
+            model=model,
+            tokenizer=tokenizer,
+            device=cfg.device,
+        )
+
+    try:
+        return _create(force=False)
+    except (FileNotFoundError, OSError, LocalEntryNotFoundError) as e:
+        # Cache entry exists but some blob/snapshot file is missing.
+        # Nuke only this model cache and force a clean download.
+        logger.warning(
+            "FinBERT cache appears incomplete (missing file). Forcing re-download. Error: %s",
+            e,
+        )
+        for d in _candidate_model_cache_dirs(cfg.model_name):
+            shutil.rmtree(d, ignore_errors=True)
+        return _create(force=True)
 
 
 def _normalize_text(x: object) -> str:
@@ -64,13 +147,6 @@ def score_finbert(
 
     cfg = cfg or FinBertConfig()
 
-    try:
-        from transformers import pipeline
-    except Exception as e:
-        raise ImportError(
-            "transformers is required for FinBERT scoring. Install: pip install transformers"
-        ) from e
-
     if summaries is None:
         summaries = [""] * len(headlines)
 
@@ -82,15 +158,7 @@ def score_finbert(
     # Avoid pipeline crashing on empty strings
     safe_texts = [t if t else "." for t in texts]
 
-    clf = pipeline(
-        task="text-classification",
-        model=cfg.model_name,
-        tokenizer=cfg.model_name,
-        device=cfg.device,
-        truncation=True,
-        max_length=cfg.max_length,
-        # return_all_scores=False by default
-    )
+    clf = _load_finbert_pipeline(cfg)
 
     labels: List[str] = []
     scores: List[float] = []
@@ -98,7 +166,7 @@ def score_finbert(
     bs = max(1, int(cfg.batch_size))
     for i in range(0, len(safe_texts), bs):
         batch = safe_texts[i : i + bs]
-        preds = clf(batch)
+        preds = clf(batch, truncation=True, max_length=cfg.max_length)
         for p in preds:
             # HF returns {'label': 'positive', 'score': 0.xx}
             labels.append(str(p["label"]).lower())
