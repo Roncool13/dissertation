@@ -110,7 +110,7 @@ jobs:
             data/features/news_sentiment_feature_metadata.json.dvc \
             .gitignore
 
-          git commit -m "DVC: update NEWS sentiment features (${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
+          git commit -m "DVC: update NEWS sentiment features (${{ inputs.symbols }}-${{ inputs.start }}-${{ inputs.end }})" || echo "No changes to commit"
 
       - name: Push dataset to DVC remote
         run: |
