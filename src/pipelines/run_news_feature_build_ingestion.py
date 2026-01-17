@@ -94,6 +94,8 @@ class NewsFeatureBuildConfig:
 
     # feature engineering
     lags: int = 5
+    target_horizon_days: int = 5
+    label_col_name: str = "y_up_5d"
 
 
 # -----------------------------
@@ -274,10 +276,6 @@ class NewsSentimentFeatureBuildIngestor:
             polarity_mean=("polarity", "mean"),
         )
 
-        # Weighted polarity mean
-        # wp = grp.apply(lambda g: wmean(g["polarity"], g["w"])).reset_index(name="polarity_wmean")
-        # out = out.merge(wp[["symbol", "date", "polarity_wmean"]], on=["symbol", "date"], how="left")
-
         wp = grp_w.apply(lambda g: wmean(g["polarity"], g["w"]))  # Series
         wp = wp.rename("polarity_wmean").reset_index()           # ok in all pandas
 
@@ -331,6 +329,81 @@ class NewsSentimentFeatureBuildIngestor:
             )
 
         return d
+    
+    def _generate_metadata(self, feats: pd.DataFrame) -> dict:
+        from datetime import datetime, timezone, date
+
+        test_year = self.cfg.end_year
+        val_year = test_year - 1
+
+        train_start = date(self.cfg.start_year, 1, 1)
+        train_end = date(val_year - 1, 12, 31)
+
+        val_start = date(val_year, 1, 1)
+        val_end = date(val_year, 12, 31)
+
+        test_start = date(test_year, 1, 1)
+        test_end = date(test_year, 12, 31)
+
+        logger.debug(
+            "Computed split windows -> train:%s-%s val:%s-%s test:%s-%s",
+            train_start,
+            train_end,
+            val_start,
+            val_end,
+            test_start,
+            test_end,
+        )
+
+        splits = {
+            "scheme": "global_time_split_v1",
+            "train": {
+                "start": train_start.isoformat(),
+                "end": train_end.isoformat(),
+            },
+            "val": {
+                "start": val_start.isoformat(),
+                "end": val_end.isoformat(),
+            },
+            "test": {
+                "start": test_start.isoformat(),
+                "end": test_end.isoformat(),
+            },
+        }
+
+        meta = {
+            "dataset": "news_sentiment_features",
+            "symbols": self.cfg.symbols,
+            "start_year": self.cfg.start_year,
+            "end_year": self.cfg.end_year,
+            "score_mode": self.cfg.score_mode,
+            "finbert": {
+                "batch_size": self.cfg.finbert_batch_size,
+                "max_length": self.cfg.finbert_max_length,
+                "device": self.cfg.finbert_device,
+            },
+            "lags": int(self.cfg.lags),
+            "row_count": int(len(feats)),
+            "min_date": str(pd.to_datetime(feats["date"]).min()) if not feats.empty else None,
+            "max_date": str(pd.to_datetime(feats["date"]).max()) if not feats.empty else None,
+            "feature_columns": [c for c in feats.columns if c not in {"symbol", "date"}],
+            "supervision": {
+                "target_horizon_days": int(self.cfg.target_horizon_days),
+                "label_col_name": self.cfg.label_col_name,
+                "join_keys": ["symbol", "date"],
+                "asof_definition": "features are computed using news up to (symbol,date) only; lagged/rolling features use past-only shifts"
+            },
+            "splits": splits,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
+        logger.debug(
+            "Metadata snapshot -> rows:%d columns:%d include_labels:%s",
+            meta["row_count"],
+            len(meta["columns"]),
+            self.cfg.include_labels,
+        )
+        return meta
 
     def build(self) -> pd.DataFrame:
         frames: List[pd.DataFrame] = []
@@ -361,24 +434,7 @@ class NewsSentimentFeatureBuildIngestor:
         feat_key = _output_key(self.cfg.output_key_prefix, self.cfg.output_features_filename)
         meta_key = _output_key(self.cfg.output_key_prefix, self.cfg.output_metadata_filename)
 
-        meta = {
-            "dataset": "news_sentiment_features",
-            "symbols": self.cfg.symbols,
-            "start_year": self.cfg.start_year,
-            "end_year": self.cfg.end_year,
-            "score_mode": self.cfg.score_mode,
-            "finbert": {
-                "batch_size": self.cfg.finbert_batch_size,
-                "max_length": self.cfg.finbert_max_length,
-                "device": self.cfg.finbert_device,
-            },
-            "lags": int(self.cfg.lags),
-            "rows": int(len(feats)),
-            "min_date": str(pd.to_datetime(feats["date"]).min()) if not feats.empty else None,
-            "max_date": str(pd.to_datetime(feats["date"]).max()) if not feats.empty else None,
-            "feature_columns": [c for c in feats.columns if c not in {"symbol", "date"}],
-        }
-
+        meta = self._generate_metadata(feats)
         logger.info("Writing NEWS features to s3://%s/%s", self.cfg.features_bucket, feat_key)
         self._write_local_and_s3(
             filename=self.cfg.output_features_filename,
@@ -417,6 +473,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--finbert-batch-size", type=int, default=16)
     p.add_argument("--finbert-max-length", type=int, default=128)
     p.add_argument("--finbert-device", type=int, default=-1)
+    p.add_argument("--target-horizon-days", type=int, default=5)
 
     p.add_argument("--lags", type=int, default=5)
 
@@ -444,6 +501,8 @@ def main() -> None:
         finbert_max_length=args.finbert_max_length,
         finbert_device=args.finbert_device,
         lags=args.lags,
+        target_horizon_days=args.target_horizon_days,
+        label_col_name=f"y_up_{args.target_horizon_days}d",
     )
 
     NewsSentimentFeatureBuildIngestor(cfg).run()
