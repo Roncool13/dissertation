@@ -73,7 +73,7 @@ jobs:
             --end-year '${{ inputs.end }}' \
             --lookback '${{ inputs.lookback }}' \
             --s3-processed-bucket "$S3_PROCESSED_BUCKET" \
-            --s3-features-bucket "$S3_FEATURES_BUCKET"
+            --s3-features-bucket "$S3_FEATURES_BUCKET" \
             --log-level '${{ inputs.log_level }}'
 
       - name: DVC track artifacts
