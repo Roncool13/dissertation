@@ -186,9 +186,10 @@ def main() -> None:
     ap.add_argument("--lookback", type=int, default=10, help="Lookback period for rolling features")
     ap.add_argument("--s3-processed-bucket", required=True, help="S3 bucket for processed OHLCV data")
     ap.add_argument("--s3-features-bucket", required=True, help="S3 bucket for feature store data")
+    ap.add_argument("--log-level", default="INFO", help="Logging level (e.g. INFO, DEBUG)")
     args = ap.parse_args()
 
-    setup_logging()
+    setup_logging(args.log_level)
 
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     cfg = PatternFeatureBuildConfig(
