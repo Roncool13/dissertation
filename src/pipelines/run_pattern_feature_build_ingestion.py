@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -133,6 +132,97 @@ class PatternFeatureBuildIngestor:
         ohlcv = pd.concat(frames, axis=0, ignore_index=True)
         return ohlcv
 
+    def _write_local_and_s3(self, filename: str, s3_key: str, write_func: Callable[[Path], None]) -> None:
+        """Write artifact locally (for DVC) and upload the same temp file to S3."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp_path = Path(td) / filename
+            logger.debug("Writing %s to temp path %s", filename, tmp_path)
+            write_func(tmp_path)
+
+            self.cfg.local_output_dir.mkdir(parents=True, exist_ok=True)
+            local_path = self.cfg.local_output_dir / filename
+            logger.debug("Writing %s to local path %s", filename, local_path)
+            write_func(local_path)
+
+            logger.info("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
+            self.s3_features.upload(local_path, s3_key)
+
+    def _generate_metadata(self, feats: pd.DataFrame) -> Dict[str, object]:
+        from datetime import datetime, timezone, date
+
+        test_year = self.cfg.end_year
+        val_year = test_year - 1
+
+        train_start = date(self.cfg.start_year, 1, 1)
+        train_end = date(val_year - 1, 12, 31)
+
+        val_start = date(val_year, 1, 1)
+        val_end = date(val_year, 12, 31)
+
+        test_start = date(test_year, 1, 1)
+        test_end = date(test_year, 12, 31)
+
+        logger.debug(
+            "Computed split windows -> train:%s-%s val:%s-%s test:%s-%s",
+            train_start,
+            train_end,
+            val_start,
+            val_end,
+            test_start,
+            test_end,
+        )
+
+        splits = {
+            "scheme": "global_time_split_v1",
+            "train": {
+                "start": train_start.isoformat(),
+                "end": train_end.isoformat(),
+            },
+            "val": {
+                "start": val_start.isoformat(),
+                "end": val_end.isoformat(),
+            },
+            "test": {
+                "start": test_start.isoformat(),
+                "end": test_end.isoformat(),
+            },
+        }
+
+        return {
+            "feature_set": "candlestick_patterns_rule_based",
+            "symbols": self.cfg.symbols,
+            "start_year": self.cfg.start_year,
+            "end_year": self.cfg.end_year,
+            "lookback": self.cfg.lookback,
+            "rows": int(len(feats)),
+            "columns": list(feats.columns),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "year_splits_default": splits,
+            "source_processed_prefix": f"{self.cfg.processed_ohlcv_prefix}/",
+        }
+
+    def write_to_s3(self, feats: pd.DataFrame) -> None:
+        key = self._output_key(self.cfg.output_features_filename)
+        self._write_local_and_s3(
+            filename=self.cfg.output_features_filename,
+            s3_key=key,
+            write_func=lambda path: feats.to_parquet(path, index=False),
+        )
+
+    def write_metadata_to_s3(self, feats: pd.DataFrame) -> None:
+        meta = self._generate_metadata(feats)
+        payload = json.dumps(meta, indent=2)
+        key = self._output_key(self.cfg.output_metadata_filename)
+
+        def _write_json(path: Path) -> None:
+            path.write_text(payload, encoding="utf-8")
+
+        self._write_local_and_s3(
+            filename=self.cfg.output_metadata_filename,
+            s3_key=key,
+            write_func=_write_json,
+        )
+
     def run(self) -> None:
         if self.cfg.start_year > self.cfg.end_year:
             raise ValueError("Start year cannot be after end year.")
@@ -147,34 +237,9 @@ class PatternFeatureBuildIngestor:
         ohlcv = self._load_all_ohlcv()
         feats = build_pattern_features(ohlcv, lookback=self.cfg.lookback)
 
-        os.makedirs(self.cfg.local_output_dir, exist_ok=True)
-        out_parquet = self.cfg.local_output_dir / self.cfg.output_features_filename
-        out_meta = self.cfg.local_output_dir / self.cfg.output_metadata_filename
+        self.write_to_s3(feats)
+        self.write_metadata_to_s3(feats)
 
-        feats.to_parquet(out_parquet, index=False)
-
-        meta = {
-            "feature_set": "candlestick_patterns_rule_based",
-            "symbols": self.cfg.symbols,
-            "start_year": self.cfg.start_year,
-            "end_year": self.cfg.end_year,
-            "lookback": self.cfg.lookback,
-            "rows": int(len(feats)),
-            "columns": list(feats.columns),
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "year_splits_default": compute_year_splits(self.cfg.start_year, self.cfg.end_year),
-            "source_processed_prefix": f"{self.cfg.processed_ohlcv_prefix}/",
-        }
-        with open(out_meta, "w") as f:
-            json.dump(meta, f, indent=2)
-
-        features_key = self._output_key(self.cfg.output_features_filename)
-        metadata_key = self._output_key(self.cfg.output_metadata_filename)
-
-        self.s3_features.upload(out_parquet, features_key)
-        self.s3_features.upload(out_meta, metadata_key)
-
-        logger.info("Wrote %s and %s", out_parquet, out_meta)
         logger.info("Uploaded to s3://%s/%s", self.cfg.features_bucket, self.cfg.output_key_prefix)
 
 
