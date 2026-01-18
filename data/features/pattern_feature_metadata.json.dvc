@@ -1,0 +1,5 @@
+outs:
+- md5: 785c8bbc822bf6ca063e468743b788ed
+  size: 1051
+  hash: md5
+  path: pattern_feature_metadata.json

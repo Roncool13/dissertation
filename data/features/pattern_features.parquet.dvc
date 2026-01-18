@@ -1,0 +1,5 @@
+outs:
+- md5: 12b2ebd5b9766a1b44f414fd87accb33
+  size: 41986
+  hash: md5
+  path: pattern_features.parquet
