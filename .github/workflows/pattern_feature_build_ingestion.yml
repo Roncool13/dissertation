@@ -1,0 +1,99 @@
+name: Pattern Feature Build – Rule-based Candlestick + DVC Track
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated NSE symbols (e.g. TCS,INFY)"
+        required: true
+        type: string
+
+      start:
+        description: "Start year (YYYY)"
+        required: true
+        type: string
+
+      end:
+        description: "End year (YYYY)"
+        required: true
+        type: string
+
+      lookback:
+        description: "Rolling count window"
+        required: false
+        default: "10"
+        type: string
+
+      log_level:
+        description: "Logging level (e.g. INFO, DEBUG)"
+        required: false
+        default: "INFO"
+        type: string
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    environment: production
+
+    permissions:
+      id-token: write
+      contents: write
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_PROCESSED_BUCKET: ${{ secrets.DIS_S3_PROCESSED_BUCKET }}
+      S3_FEATURES_BUCKET: ${{ secrets.DIS_S3_FEATURES_BUCKET }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "dvc[s3]"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build pattern features
+        run: |
+          python -m src.pipelines.run_pattern_feature_build_ingestion \
+            --symbols '${{ inputs.symbols }}' \
+            --start-year '${{ inputs.start }}' \
+            --end-year '${{ inputs.end }}' \
+            --lookback '${{ inputs.lookback }}' \
+            --s3-processed-bucket "$S3_PROCESSED_BUCKET" \
+            --s3-features-bucket "$S3_FEATURES_BUCKET"
+
+      - name: DVC track artifacts
+        run: |
+          dvc add data/features/pattern_features.parquet
+          dvc add data/features/pattern_feature_metadata.json
+
+      - name: Commit DVC pointers
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add \
+            data/features/pattern_features.parquet.dvc \
+            data/features/pattern_feature_metadata.json.dvc \
+            .gitignore
+
+          git commit -m "DVC: update pattern features (${{ inputs.symbols }}-${{ inputs.start }}-${{ inputs.end }})" || echo "No changes"
+
+      - name: Push dataset to DVC remote
+        run: dvc push
+
+      - name: Push git commit
+        run: git push
