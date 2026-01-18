@@ -38,3 +38,7 @@ FEATURE_STORE_OHLCV_METADATA_FILENAME = "ohlcv_feature_metadata.json"
 FEATURE_STORE_NEWS_PREFIX = "features"
 FEATURE_STORE_NEWS_FILENAME = "news_sentiment_features.parquet"
 FEATURE_STORE_NEWS_METADATA_FILENAME = "news_sentiment_feature_metadata.json"
+
+FEATURE_STORE_PATTERN_PREFIX = "features"
+FEATURE_STORE_PATTERN_FILENAME = "pattern_features.parquet"
+FEATURE_STORE_PATTERN_METADATA_FILENAME = "pattern_feature_metadata.json"
