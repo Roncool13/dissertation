@@ -210,3 +210,6 @@ __marimo__/
 data/**/*.parquet
 data/**/*.csv
 notebooks/*.csv
+
+# Old files
+*.old
