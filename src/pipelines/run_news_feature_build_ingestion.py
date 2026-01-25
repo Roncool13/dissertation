@@ -81,6 +81,12 @@ class NewsFeatureBuildConfig:
     processed_news_prefix: str = storage_constants.PROCESSED_NEWS_PREFIX
     processed_news_filename: str = storage_constants.PROCESSED_NEWS_FILENAME
 
+    # optional label source (OHLCV)
+    processed_ohlcv_prefix: str = storage_constants.PROCESSED_OHLCV_PREFIX if hasattr(storage_constants, 'PROCESSED_OHLCV_PREFIX') else 'processed/ohlcv'
+    processed_ohlcv_filename: str = storage_constants.PROCESSED_OHLCV_FILENAME if hasattr(storage_constants, 'PROCESSED_OHLCV_FILENAME') else 'ohlcv_processed.parquet'
+    attach_label: bool = True
+    feature_shift_days: int = 1
+
     # output location
     output_key_prefix: str = storage_constants.FEATURE_STORE_NEWS_PREFIX
     output_features_filename: str = storage_constants.FEATURE_STORE_NEWS_FILENAME
@@ -95,7 +101,8 @@ class NewsFeatureBuildConfig:
     # feature engineering
     lags: int = 5
     target_horizon_days: int = 5
-    label_col_name: str = "y_up_5d"
+    # If attach_label=True, output label column name will be resolved as f"y_up_{target_horizon_days}d" unless explicitly set.
+    label_col_name: str = ""
 
 
 # -----------------------------
@@ -196,6 +203,59 @@ class NewsSentimentFeatureBuildIngestor:
             df["sentiment_score"] = 0.0
 
         return df
+
+    def _resolve_label_col(self) -> str:
+        """Resolve output label column name based on config."""
+        if getattr(self.cfg, "label_col_name", ""):
+            return self.cfg.label_col_name
+        return f"y_up_{int(self.cfg.target_horizon_days)}d"
+
+    def _load_ohlcv_year(self, symbol: str, year: int) -> pd.DataFrame:
+        """Load processed OHLCV for a symbol-year from the processed bucket."""
+        key = f"{self.cfg.processed_ohlcv_prefix}/{symbol}/{year}/{self.cfg.processed_ohlcv_filename}"
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / f"ohlcv_{symbol}_{year}.parquet"
+            self.s3_processed.download_file(key, str(local))
+            df = pd.read_parquet(local)
+        if "date" not in df.columns:
+            raise ValueError(f"OHLCV parquet missing 'date' column: {key}")
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        if "close" not in df.columns:
+            raise ValueError(f"OHLCV parquet missing 'close' column: {key}")
+        return df[["symbol", "date", "close"]].copy()
+
+    def _attach_labels_from_ohlcv(self, feats: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Attach forward-return direction label y_up_{H}d using processed OHLCV closes."""
+        horizon = int(self.cfg.target_horizon_days)
+        label_col = self._resolve_label_col()
+
+        years = list(range(self.cfg.start_year, self.cfg.end_year + 1))
+        # Try loading the next year too, to avoid losing labels at year boundaries.
+        years_plus = years + [self.cfg.end_year + 1]
+
+        ohlcv_parts = []
+        for y in years_plus:
+            try:
+                ohlcv_parts.append(self._load_ohlcv_year(symbol, y))
+            except Exception:
+                # next-year might not exist; that's fine
+                if y == self.cfg.end_year + 1:
+                    continue
+                raise
+
+        if not ohlcv_parts:
+            raise RuntimeError("No OHLCV data loaded to compute labels.")
+
+        ohlcv = pd.concat(ohlcv_parts, ignore_index=True)
+        ohlcv = ohlcv.sort_values(["symbol", "date"]).reset_index(drop=True)
+
+        ohlcv[label_col] = (ohlcv.groupby("symbol", sort=False)["close"].shift(-horizon) > ohlcv["close"]).astype("float")
+        # Keep only rows where label is known
+        label_df = ohlcv[["symbol", "date", label_col]].dropna().copy()
+
+        feats["date"] = pd.to_datetime(feats["date"]).dt.normalize()
+        out = feats.merge(label_df, on=["symbol", "date"], how="left")
+        return out
 
     def _score_finbert_if_needed(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
@@ -427,6 +487,23 @@ class NewsSentimentFeatureBuildIngestor:
 
         # Feast expects event timestamp column
         daily["date"] = pd.to_datetime(daily["date"]).dt.tz_localize(None)
+
+
+        # Optional leakage-safe shift: ensure features use only information available BEFORE the label day.
+        shift_n = int(getattr(self.cfg, "feature_shift_days", 0) or 0)
+        if shift_n > 0:
+            feature_cols = [c for c in daily.columns if c not in ["symbol", "date"]]
+            daily[feature_cols] = daily.groupby("symbol", sort=False)[feature_cols].shift(shift_n)
+            daily = daily.dropna(subset=feature_cols).reset_index(drop=True)
+
+        # Optional label attachment from processed OHLCV (standalone sentiment training)
+        if bool(getattr(self.cfg, "attach_label", False)) and not daily.empty:
+            labeled_parts: List[pd.DataFrame] = []
+            for sym, sym_df in daily.groupby("symbol", sort=False):
+                labeled_parts.append(self._attach_labels_from_ohlcv(sym_df.copy(), symbol=sym))
+            daily = pd.concat(labeled_parts, ignore_index=True)
+            daily.sort_values(["symbol", "date"], inplace=True)
+            daily.reset_index(drop=True, inplace=True)
 
         return daily
 
