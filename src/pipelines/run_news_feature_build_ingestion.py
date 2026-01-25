@@ -264,6 +264,7 @@ class NewsSentimentFeatureBuildPipeline:
         df["w"] = (df["relevance_score"].clip(lower=0) + 1e-6) * df["finbert_score"].clip(lower=1e-6)
 
         grp = df.groupby(["symbol", "date"], as_index=False)
+        grp_plain = df.groupby(["symbol", "date"], sort=False)
         out = grp.agg(
             article_count=("polarity", "size"),
             pos_count=("finbert_label", lambda x: int((pd.Series(x).str.lower() == "positive").sum())),
@@ -276,18 +277,19 @@ class NewsSentimentFeatureBuildPipeline:
             polarity_std=("polarity", "std"),
         )
 
-        wp = grp.apply(lambda g: _weighted_mean(g["polarity"], g["w"])).reset_index(name="polarity_wmean")
+        wp = grp_plain.apply(lambda g: _weighted_mean(g["polarity"], g["w"]))
+        wp = wp.rename("polarity_wmean").reset_index()
         out = out.merge(wp, on=["symbol", "date"], how="left")
 
-        hr_mean = grp.apply(
+        hr_mean = grp_plain.apply(
             lambda g: float(g.loc[g["is_highrel"] == 1, "polarity"].mean()) if (g["is_highrel"] == 1).any() else np.nan
-        ).reset_index(name="highrel_polarity_mean")
-        hr_wmean = grp.apply(
+        ).rename("highrel_polarity_mean").reset_index()
+        hr_wmean = grp_plain.apply(
             lambda g: _weighted_mean(
                 g.loc[g["is_highrel"] == 1, "polarity"],
                 g.loc[g["is_highrel"] == 1, "w"],
-            ) if (g["is_highrel"] == 1).any() else np.nan
-        ).reset_index(name="highrel_polarity_wmean")
+            ) if (g["is_highrel"] == 1).any() else np.nan,
+        ).rename("highrel_polarity_wmean").reset_index()
         out = out.merge(hr_mean, on=["symbol", "date"], how="left")
         out = out.merge(hr_wmean, on=["symbol", "date"], how="left")
 
