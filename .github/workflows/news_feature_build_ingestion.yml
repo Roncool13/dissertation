@@ -20,12 +20,6 @@ on:
         required: true
         type: string
 
-      horizon_days:
-        description: "Horizon days for feature calculation"
-        required: false
-        default: "5"
-        type: string
-
       score_mode:
         description: "Scoring mode (e.g. finbert, skip)"
         required: false
@@ -105,7 +99,6 @@ jobs:
             --score-mode '${{ inputs.score_mode }}' \
             --finbert-batch-size 16 \
             --finbert-max-length 128 \
-            --horizon-days '${{ inputs.horizon_days }}' \
             --log-level '${{ inputs.log_level }}'
 
       - name: DVC track dataset artifacts
