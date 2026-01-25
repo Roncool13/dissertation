@@ -49,7 +49,7 @@ class NewsFeatureBuildConfig:
     local_features_dir: str = "data/features"
     output_features_filename: str = storage_constants.FEATURE_STORE_NEWS_FILENAME
     output_metadata_filename: str = storage_constants.FEATURE_STORE_NEWS_METADATA_FILENAME
-    output_key_prefix: str = f"{storage_constants.PROCESSED_S3_PREFIX}/features/news"
+    output_key_prefix: str = storage_constants.FEATURE_STORE_NEWS_PREFIX
     upload_to_s3: bool = True
 
     score_mode: str = "finbert"  # finbert|skip
