@@ -9,9 +9,9 @@ import logging
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 # Third-party imports
 import pandas as pd
@@ -147,60 +147,20 @@ class PatternFeatureBuildIngestor:
             logger.info("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
             self.s3_features.upload(local_path, s3_key)
 
-    def _generate_metadata(self, feats: pd.DataFrame) -> Dict[str, object]:
-        from datetime import datetime, timezone, date
-
-        test_year = self.cfg.end_year
-        val_year = test_year - 1
-
-        train_start = date(self.cfg.start_year, 1, 1)
-        train_end = date(val_year - 1, 12, 31)
-
-        val_start = date(val_year, 1, 1)
-        val_end = date(val_year, 12, 31)
-
-        test_start = date(test_year, 1, 1)
-        test_end = date(test_year, 12, 31)
-
-        logger.debug(
-            "Computed split windows -> train:%s-%s val:%s-%s test:%s-%s",
-            train_start,
-            train_end,
-            val_start,
-            val_end,
-            test_start,
-            test_end,
-        )
-
-        splits = {
-            "scheme": "global_time_split_v1",
-            "train": {
-                "start": train_start.isoformat(),
-                "end": train_end.isoformat(),
-            },
-            "val": {
-                "start": val_start.isoformat(),
-                "end": val_end.isoformat(),
-            },
-            "test": {
-                "start": test_start.isoformat(),
-                "end": test_end.isoformat(),
-            },
-        }
-
+    def _generate_metadata(self, feats: pd.DataFrame) -> Dict[str, Any]:
+        """Generate metadata JSON for multi-symbol pattern features."""
+        cfg = self.cfg
         return {
-            "feature_set": "candlestick_patterns_rule_based",
-            "symbols": self.cfg.symbols,
-            "start_year": self.cfg.start_year,
-            "end_year": self.cfg.end_year,
-            "lookback": self.cfg.lookback,
-            "rows": int(len(feats)),
-            "columns": list(feats.columns),
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "year_splits_default": splits,
-            "source_processed_prefix": f"{self.cfg.processed_ohlcv_prefix}/",
+            "pipeline": "pattern_feature_build",
+            "created_utc": datetime.utcnow().isoformat() + "Z",
+            "symbols": cfg.symbols,
+            "start_year": cfg.start_year,
+            "end_year": cfg.end_year,
+            "lookback": cfg.lookback,
+            "n_rows": int(len(feats)),
+            "n_days": int(feats["date"].nunique()) if "date" in feats.columns else None,
         }
-
+    
     def write_to_s3(self, feats: pd.DataFrame) -> None:
         key = self._output_key(self.cfg.output_features_filename)
         self._write_local_and_s3(
