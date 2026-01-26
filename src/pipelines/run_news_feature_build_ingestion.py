@@ -1,33 +1,67 @@
-"""src/pipelines/run_news_feature_build_ingestion_REWRITTEN.py
+"""src/pipelines/run_news_feature_build_ingestion.py
 
-Daily news sentiment feature builder rewritten to follow the same design
-structure as run_news_feature_build_ingestion.py while preserving the extended
-feature engineering, FinBERT scoring, and optional OHLCV label attachment logic
-from the rewritten prototype.
+Build DAILY sentiment features from *processed* news parquet and write a consolidated
+features parquet to S3 for Feast / model training.
+
+Inputs (processed news):
+  s3://{bucket}/processed/news/{SYMBOL}/{YEAR}/news_processed.parquet
+  Expected canonical columns (from clean_desiq_news_data + relevance_scoring):
+    - date (python date or datetime-like)
+    - symbol
+    - headline
+    - summary
+    - relevance_score, relevance_label
+    - sentiment_score, sentiment_label   (placeholders may be present)
+
+Outputs (news features):
+  s3://{bucket}/features/news/news_sentiment_features.parquet
+  plus metadata json alongside it.
+
+Key design:
+- Optionally run FinBERT scoring (slow) OR skip and use existing sentiment columns.
+- Aggregates to daily per (symbol, date) features.
+- Adds lag features (t-1..t-k) and simple rolling stats.
+
+CLI examples:
+  python src/pipelines/run_news_feature_build_ingestion.py \
+    --symbols TCS,INFY \
+    --start-year 2021 --end-year 2023 \
+    --s3-bucket dissertation-databucket \
+    --score-mode finbert \
+    --lags 5
+
+  # fast path (if sentiment already present):
+  python src/pipelines/run_news_feature_build_ingestion.py \
+    --symbols TCS \
+    --start-year 2021 --end-year 2023 \
+    --score-mode skip
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import datetime
 import logging
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
 
-# Mirror the original pipeline import pattern
+# Add parent directory to path for local imports (matching your OHLCV feature builder style)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.config import setup_logging
 from src.io.connections import S3Connection
 from src.constants import storage as storage_constants
-from src.nlp.sentiment_finbert import score_finbert, FinBertConfig
+
+# Reuse your relevance scoring module output columns
+from src.nlp.sentiment_finbert import FinBertConfig, score_finbert
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +71,10 @@ logger = logging.getLogger(__name__)
 # -----------------------------
 @dataclass(frozen=True)
 class NewsFeatureBuildConfig:
+    # S3 buckets
     processed_bucket: str
     features_bucket: str
+
     symbols: List[str]
     start_year: int
     end_year: int
@@ -46,123 +82,88 @@ class NewsFeatureBuildConfig:
     processed_news_prefix: str = storage_constants.PROCESSED_NEWS_PREFIX
     processed_news_filename: str = storage_constants.PROCESSED_NEWS_FILENAME
 
+    # output location
     local_features_dir: str = "data/features"
+    output_key_prefix: str = storage_constants.FEATURE_STORE_NEWS_PREFIX
     output_features_filename: str = storage_constants.FEATURE_STORE_NEWS_FILENAME
     output_metadata_filename: str = storage_constants.FEATURE_STORE_NEWS_METADATA_FILENAME
-    output_key_prefix: str = storage_constants.FEATURE_STORE_NEWS_PREFIX
-    upload_to_s3: bool = True
 
-    score_mode: str = "finbert"  # finbert|skip
+    # scoring
+    score_mode: str = "skip"  # finbert|skip
     finbert_batch_size: int = 16
     finbert_max_length: int = 128
     finbert_device: int = -1
 
+    # feature engineering
     lags: int = 5
-    roll_windows: Tuple[int, ...] = (3, 5, 10, 20)
-    shock_window: int = 20
-    shock_z: float = 1.5
+    target_horizon_days: int = 5
+    label_col_name: str = "y_up_5d"
 
-    attach_label: bool = True
+    # OHLCV supervision
     ohlcv_filename: str = storage_constants.FEATURE_STORE_OHLCV_FILENAME
     ohlcv_metadata_filename: str = storage_constants.FEATURE_STORE_OHLCV_METADATA_FILENAME
     ohlcv_features_path: str = f"{storage_constants.FEATURE_STORE_OHLCV_PREFIX}/{storage_constants.FEATURE_STORE_OHLCV_FILENAME}"
     ohlcv_metadata_path: str = f"{storage_constants.FEATURE_STORE_OHLCV_PREFIX}/{storage_constants.FEATURE_STORE_OHLCV_METADATA_FILENAME}"
-    label_col_fallback: str = "y_up_5d"
 
 
 # -----------------------------
 # Helpers
 # -----------------------------
+
+def _safe_text(x: object) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return ""
+    return str(x).strip()
+
+
 def _ensure_datetime_date(col: pd.Series) -> pd.Series:
+    """Ensure the 'date' column is pandas datetime64[ns] normalized to midnight."""
+    # processed pipeline sets `date` as python `dt.date`; handle both.
     d = pd.to_datetime(col, errors="coerce")
     return d.dt.normalize()
 
 
-def _safe_text(val: object) -> str:
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return ""
-    return str(val).strip()
+def _input_key(prefix: str, symbol: str, year: int, filename: str) -> str:
+    return f"{prefix}/{symbol}/{year}/{filename}"
 
 
-def _weighted_mean(x: pd.Series, w: pd.Series) -> float:
-    x = pd.to_numeric(x, errors="coerce")
-    w = pd.to_numeric(w, errors="coerce")
-    mask = x.notna() & w.notna()
-    if not mask.any():
-        return float("nan")
-    x = x[mask].astype(float)
-    w = w[mask].astype(float)
-    denom = w.sum()
-    if denom == 0:
-        return float("nan")
-    return float((x * w).sum() / denom)
-
-
-def _infer_label_col(meta: Dict[str, object], fallback: str) -> str:
-    horizon = meta.get("horizon_days")
-    if horizon is not None:
-        return f"y_up_{int(horizon)}d"
-    return meta.get("label_col", fallback)
+def _output_key(prefix: str, filename: str) -> str:
+    return f"{prefix}/{filename}"
 
 
 # -----------------------------
-# Pipeline implementation
+# Main builder
 # -----------------------------
-class NewsSentimentFeatureBuildPipeline:
+class NewsSentimentFeatureBuildIngestor:
     def __init__(self, cfg: NewsFeatureBuildConfig):
         self.cfg = cfg
         self.s3_processed = S3Connection(bucket=cfg.processed_bucket)
         self.s3_features = S3Connection(bucket=cfg.features_bucket)
         self.local_dir = Path(cfg.local_features_dir)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.finbert_cfg = FinBertConfig(
+            batch_size=self.cfg.finbert_batch_size,
+            max_length=self.cfg.finbert_max_length,
+            device=self.cfg.finbert_device,
+        )
 
-    # ---------- S3 helpers ----------
-    def _news_key(self, symbol: str, year: int) -> str:
-        return f"{self.cfg.processed_news_prefix}/{symbol}/{year}/{self.cfg.processed_news_filename}"
+    def _download_parquet(self, key: str, dst: Path) -> None:
+        self.s3_processed.s3_client.download_file(self.cfg.processed_bucket, key, str(dst))
 
-    # ---------- Loading ----------
-    def _load_news_year(self, symbol: str, year: int) -> pd.DataFrame:
-        key = self._news_key(symbol, year)
-        logger.debug("Fetching processed news for symbol=%s year=%s key=%s", symbol, year, key)
-        if not self.s3_processed.object_exists(key):
-            logger.warning(
-                "Missing processed news for %s %s at s3://%s/%s",
-                symbol,
-                year,
-                self.cfg.processed_bucket,
-                key,
-            )
-            return pd.DataFrame()
-
+    def _write_local_and_s3(self, filename: str, s3_key: str, write_func: Callable[[Path], None]) -> None:
+        """Write artifact locally (for DVC) and upload the same temp file to S3."""
         with tempfile.TemporaryDirectory() as td:
-            local_path = Path(td) / f"news_{symbol}_{year}.parquet"
-            self.s3_processed.s3_client.download_file(self.cfg.processed_bucket, key, str(local_path))
-            df = pd.read_parquet(local_path)
-            logger.debug("Downloaded news parquet for %s %s (%d rows)", symbol, year, len(df))
+            tmp_path = Path(td) / filename
+            logger.debug("Writing %s to temp path %s", filename, tmp_path)
+            write_func(tmp_path)
 
-        if df is None or df.empty:
-            return pd.DataFrame()
+            local_path = self.local_dir / filename
+            logger.debug("Writing %s to local DVC path %s", filename, local_path)
+            write_func(local_path)
 
-        df = df.copy()
-        if "symbol" not in df.columns:
-            df.insert(0, "symbol", symbol)
-        else:
-            df["symbol"] = df["symbol"].fillna(symbol)
+            logger.info("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
+            self.s3_features.upload_file(tmp_path, s3_key)
 
-        if "date" not in df.columns:
-            if "published_at" in df.columns:
-                df["date"] = _ensure_datetime_date(df["published_at"])
-            else:
-                raise ValueError(f"Processed news parquet missing 'date' (symbol={symbol}, year={year})")
-        else:
-            df["date"] = _ensure_datetime_date(df["date"])
-
-        # Require at least one rich text column for scoring
-        if not any(col in df.columns for col in ("headline", "title", "summary")):
-            raise ValueError(f"Processed news parquet missing headline/title columns for {symbol} {year}")
-
-        return df.dropna(subset=["date", "symbol"]).reset_index(drop=True)
-    
     def _load_ohlcv_features(self, key, filename):
         logger.debug("Attempting to download OHLCV artifact %s -> %s", key, filename)
         if not self.s3_features.object_exists(key):
@@ -178,274 +179,280 @@ class NewsSentimentFeatureBuildPipeline:
         logger.debug("Downloaded OHLCV artifact to %s", local_path)
         return local_path
 
-    def _load_all_news(self) -> pd.DataFrame:
-        logger.info("Loading processed news for symbols=%s years=%s-%s", self.cfg.symbols, self.cfg.start_year, self.cfg.end_year)
-        frames: List[pd.DataFrame] = []
-        for symbol in self.cfg.symbols:
-            for year in range(self.cfg.start_year, self.cfg.end_year + 1):
-                df = self._load_news_year(symbol, year)
-                if not df.empty:
-                    frames.append(df)
-                    logger.debug("Accumulated %d rows for symbol=%s after year=%s", len(df), symbol, year)
-        if not frames:
-            raise RuntimeError("No processed news data found for requested symbols/years.")
-        out = pd.concat(frames, ignore_index=True)
-        out = out.dropna(subset=["symbol", "date"]).reset_index(drop=True)
-        logger.info("Loaded %d processed news rows across %d symbol-year files", len(out), len(frames))
-        return out
+    def _load_news_year(self, symbol: str, year: int) -> pd.DataFrame:
+        key = _input_key(self.cfg.processed_news_prefix, symbol, year, self.cfg.processed_news_filename)
+        if not self.s3_processed.object_exists(key):
+            logger.warning("Missing processed NEWS: s3://%s/%s (skipping)", self.cfg.processed_bucket, key)
+            return pd.DataFrame()
 
-    # ---------- Scoring ----------
-    def _ensure_sentiment_columns(self, articles: pd.DataFrame) -> pd.DataFrame:
-        cfg = self.cfg
-        df = articles.copy()
-        existing = {"finbert_label", "finbert_score"}.issubset(df.columns)
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / f"{symbol}_{year}_news.parquet"
+            logger.info("Downloading %s -> %s", key, local)
+            self._download_parquet(key, local)
+            df = pd.read_parquet(local)
 
-        if cfg.score_mode == "skip" and existing:
-            logger.info("score_mode=skip and existing FinBERT columns present → reusing scores")
-        elif cfg.score_mode == "skip" and not existing:
-            logger.warning("score_mode=skip but FinBERT columns missing → defaulting to neutral sentiment")
-            df["finbert_label"] = "neutral"
-            df["finbert_score"] = 0.5
+        if df.empty:
+            return df
+
+        # normalize schema
+        df = df.copy()
+        if "symbol" not in df.columns:
+            df.insert(0, "symbol", symbol)
+        df["symbol"] = df["symbol"].astype(str)
+
+        if "date" not in df.columns:
+            raise ValueError(f"Processed news missing 'date' for {symbol} {year}. Columns={list(df.columns)}")
+
+        df["date"] = _ensure_datetime_date(df["date"])
+
+        # some safety: drop rows without headline
+        if "headline" in df.columns:
+            df = df.dropna(subset=["headline"]).copy()
         else:
-            logger.debug("Running FinBERT scoring for %d articles", len(df))
-            # text_cols = [
-            #     c
-            #     # for c in ["title", "headline", "summary", "description", "content"]
-            #     for c in ["headline", "summary"]
-            #     if c in df.columns
-            # ]
-            # if not text_cols:
-            #     raise ValueError("No usable text columns available for FinBERT scoring.")
-            # df["_text"] = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.strip()
-            # empty_mask = df["_text"].str.len() == 0
-            # df.loc[empty_mask, "_text"] = "."
+            raise ValueError(f"Processed news missing 'headline' for {symbol} {year}. Columns={list(df.columns)}")
 
-            # labels, scores = score_finbert(
-            #     df["_text"].tolist(),
-            #     batch_size=cfg.finbert_batch_size,
-            #     max_length=cfg.finbert_max_length,
-            #     device=cfg.finbert_device,
-            # )
-            # Build text input (headline is most important; add summary if present)
-            headline = df["headline"].map(_safe_text)
-            summary = df.get("summary", pd.Series([""] * len(df))).map(_safe_text)
-            text = (headline + ". " + summary).str.strip()
-
-            cfg = FinBertConfig(
-                batch_size=self.cfg.finbert_batch_size,
-                max_length=self.cfg.finbert_max_length,
-                device=self.cfg.finbert_device,
-            )
-
-            labels, scores = score_finbert(text.tolist(), cfg=cfg)
-            df["finbert_label"] = labels
-            df["finbert_score"] = scores
-            df = df.drop(columns=["_text"], errors="ignore")
-            pos = sum(str(lbl).lower() == "positive" for lbl in labels)
-            neg = sum(str(lbl).lower() == "negative" for lbl in labels)
-            logger.debug("Finished FinBERT scoring; positive=%d negative=%d", pos, neg)
-
-        lab = df["finbert_label"].astype(str).str.lower()
-        df["polarity"] = np.where(lab == "positive", 1.0, np.where(lab == "negative", -1.0, 0.0))
-
+        # make sure relevance exists (processed pipeline should have it)
         if "relevance_score" not in df.columns:
-            df["relevance_score"] = 0.0
-        df["relevance_score"] = pd.to_numeric(df["relevance_score"], errors="coerce").fillna(0.0)
-        df["finbert_score"] = pd.to_numeric(df["finbert_score"], errors="coerce").fillna(0.5)
+            df["relevance_score"] = 1.0
+        if "relevance_label" not in df.columns:
+            df["relevance_label"] = "unknown"
+
+        # ensure sentiment cols exist
+        if "sentiment_label" not in df.columns:
+            df["sentiment_label"] = "neutral"
+        if "sentiment_score" not in df.columns:
+            df["sentiment_score"] = 0.0
+
         return df
 
-    # ---------- Feature engineering ----------
-    def _build_daily_features(self, articles: pd.DataFrame) -> pd.DataFrame:
-        cfg = self.cfg
-        df = articles.copy()
-        logger.debug("Building daily features from %d article rows", len(df))
-        df["date"] = _ensure_datetime_date(df["date"])
-        df["is_highrel"] = (df.get("relevance_score", 0.0) >= 0.30).astype(int)
-        df["w"] = (df["relevance_score"].clip(lower=0) + 1e-6) * df["finbert_score"].clip(lower=1e-6)
+    def _score_finbert_if_needed(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
 
-        grp = df.groupby(["symbol", "date"], as_index=False)
-        grp_plain = df.groupby(["symbol", "date"], sort=False)
-        out = grp.agg(
-            article_count=("polarity", "size"),
-            pos_count=("finbert_label", lambda x: int((pd.Series(x).str.lower() == "positive").sum())),
-            neg_count=("finbert_label", lambda x: int((pd.Series(x).str.lower() == "negative").sum())),
-            neu_count=("finbert_label", lambda x: int((pd.Series(x).str.lower() == "neutral").sum())),
+        mode = (self.cfg.score_mode or "skip").lower().strip()
+        if mode == "skip":
+            logger.info("score_mode=skip → using existing sentiment_* columns")
+            return df
+
+        if mode != "finbert":
+            raise ValueError(f"Unknown score_mode: {self.cfg.score_mode}. Use finbert|skip")
+
+        # Build text input (headline is most important; add summary if present)
+        headline = df["headline"].map(_safe_text)
+        summary = df.get("summary", pd.Series([""] * len(df))).map(_safe_text)
+        text = (headline + ". " + summary).str.strip()
+
+        labels, scores = score_finbert(text.tolist(), cfg=self.finbert_cfg)
+        out = df.copy()
+        out["sentiment_label"] = labels
+        out["sentiment_score"] = scores
+
+        return out
+
+    @staticmethod
+    def _daily_aggregate(df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate article-level sentiments into daily features per symbol/date."""
+        if df is None or df.empty:
+            return df
+
+        d = df.copy()
+        d["date"] = _ensure_datetime_date(d["date"])
+
+        # Map label -> signed polarity
+        label = d["sentiment_label"].astype(str).str.lower()
+        polarity = np.where(label == "positive", 1.0, np.where(label == "negative", -1.0, 0.0))
+        d["polarity"] = polarity.astype(float)
+
+        # Weight by relevance_score (clip to avoid explosions)
+        w = pd.to_numeric(d.get("relevance_score", 1.0), errors="coerce").fillna(1.0)
+        w = w.clip(lower=0.0, upper=5.0)
+        d["w"] = w
+
+        # counts
+        d["is_pos"] = (label == "positive").astype(int)
+        d["is_neg"] = (label == "negative").astype(int)
+        d["is_neu"] = (label == "neutral").astype(int)
+        d["is_highrel"] = (d.get("relevance_label", "").astype(str).str.lower() == "high").astype(int)
+
+        # Sentiment score is confidence of predicted label; keep mean of this too
+        d["sentiment_score"] = pd.to_numeric(d.get("sentiment_score", 0.0), errors="coerce").fillna(0.0)
+
+        def wmean(x: pd.Series, w: pd.Series) -> float:
+            denom = float(w.sum())
+            if denom <= 0:
+                return float(np.nan)
+            return float((x * w).sum() / denom)
+
+        # Weighted polarity mean (make sure apply returns a Series)
+        grp_w = d.groupby(["symbol", "date"], sort=False)
+
+        # Daily aggregates
+        out = grp_w.agg(
+            article_count=("headline", "count"),
+            pos_count=("is_pos", "sum"),
+            neg_count=("is_neg", "sum"),
+            neu_count=("is_neu", "sum"),
             highrel_count=("is_highrel", "sum"),
             rel_score_mean=("relevance_score", "mean"),
-            sent_conf_mean=("finbert_score", "mean"),
+            sent_conf_mean=("sentiment_score", "mean"),
             polarity_mean=("polarity", "mean"),
-            polarity_std=("polarity", "std"),
         )
 
-        wp = grp_plain.apply(lambda g: _weighted_mean(g["polarity"], g["w"]))
-        wp = wp.rename("polarity_wmean").reset_index()
+        wp = grp_w.apply(lambda g: wmean(g["polarity"], g["w"]))  # Series
+        wp = wp.rename("polarity_wmean").reset_index()           # ok in all pandas
+
         out = out.merge(wp, on=["symbol", "date"], how="left")
 
-        hr_mean = grp_plain.apply(
-            lambda g: float(g.loc[g["is_highrel"] == 1, "polarity"].mean()) if (g["is_highrel"] == 1).any() else np.nan
-        ).rename("highrel_polarity_mean").reset_index()
-        hr_wmean = grp_plain.apply(
-            lambda g: _weighted_mean(
-                g.loc[g["is_highrel"] == 1, "polarity"],
-                g.loc[g["is_highrel"] == 1, "w"],
-            ) if (g["is_highrel"] == 1).any() else np.nan,
-        ).rename("highrel_polarity_wmean").reset_index()
-        out = out.merge(hr_mean, on=["symbol", "date"], how="left")
-        out = out.merge(hr_wmean, on=["symbol", "date"], how="left")
-
-        out["article_count"] = out["article_count"].astype(float)
+        # Ratios
         out["pos_ratio"] = out["pos_count"] / out["article_count"].replace(0, np.nan)
         out["neg_ratio"] = out["neg_count"] / out["article_count"].replace(0, np.nan)
         out["neu_ratio"] = out["neu_count"] / out["article_count"].replace(0, np.nan)
         out["highrel_ratio"] = out["highrel_count"] / out["article_count"].replace(0, np.nan)
 
-        out["sent_cov"] = out["polarity_wmean"] * np.log1p(out["article_count"].fillna(0))
-        out["sent_abs"] = out["polarity_wmean"].abs()
-        out["imbalance"] = out["pos_ratio"].fillna(0) - out["neg_ratio"].fillna(0)
-        out["highrel_impact"] = out["highrel_polarity_wmean"] * out["highrel_ratio"].fillna(0)
-        out["news_present"] = (out["article_count"].fillna(0) > 0).astype(float)
+        # Fill NaNs from division-by-zero with 0
+        for c in ["pos_ratio", "neg_ratio", "neu_ratio", "highrel_ratio"]:
+            out[c] = out[c].fillna(0.0)
 
-        out = out.sort_values(["symbol", "date"]).reset_index(drop=True)
+        # Sort for lagging
+        out.sort_values(["symbol", "date"], inplace=True)
+        out.reset_index(drop=True, inplace=True)
 
-        base_cols = [
-            "article_count",
-            "pos_ratio",
-            "neg_ratio",
-            "neu_ratio",
-            "highrel_ratio",
-            "rel_score_mean",
-            "sent_conf_mean",
-            "polarity_mean",
-            "polarity_std",
-            "polarity_wmean",
-            "highrel_polarity_mean",
-            "highrel_polarity_wmean",
-            "sent_cov",
-            "sent_abs",
-            "imbalance",
-            "highrel_impact",
-            "news_present",
-        ]
-
-        for lag in range(1, cfg.lags + 1):
-            for col in base_cols:
-                out[f"{col}_lag_{lag}"] = out.groupby("symbol", sort=False)[col].shift(lag)
-
-        for window in cfg.roll_windows:
-            shifted_cov = out.groupby("symbol", sort=False)["sent_cov"].shift(1)
-            shifted_ac = out.groupby("symbol", sort=False)["article_count"].shift(1)
-            out[f"sent_cov_roll_mean_{window}"] = shifted_cov.rolling(window, min_periods=max(2, window // 2)).mean()
-            out[f"sent_cov_roll_std_{window}"] = shifted_cov.rolling(window, min_periods=max(2, window // 2)).std()
-            out[f"article_count_roll_mean_{window}"] = shifted_ac.rolling(window, min_periods=max(2, window // 2)).mean()
-
-        for col in ["polarity_wmean", "sent_cov", "article_count"]:
-            # Causal z-score: use ONLY information available strictly before the current day
-            # x_t uses the previous day's value (shift(1)); rolling stats are computed on that shifted series per symbol.
-            x = out.groupby("symbol", sort=False)[col].shift(1)
-
-            mu = (
-                x.groupby(out["symbol"], sort=False)
-                .rolling(cfg.shock_window, min_periods=max(5, cfg.shock_window // 4))
-                .mean()
-                .reset_index(level=0, drop=True)
-            )
-            sigma = (
-                x.groupby(out["symbol"], sort=False)
-                .rolling(cfg.shock_window, min_periods=max(5, cfg.shock_window // 4))
-                .std()
-                .reset_index(level=0, drop=True)
-            )
-
-            z = (x - mu) / sigma.replace(0, np.nan)
-            z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            out[f"{col}_z{cfg.shock_window}"] = z
-            out[f"{col}_pos_shock"] = (z > cfg.shock_z).astype(float)
-            out[f"{col}_neg_shock"] = (z < -cfg.shock_z).astype(float)
-        feature_cols = [c for c in out.columns if c not in {"symbol", "date"}]
-        out[feature_cols] = out[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        logger.info("Constructed %d daily feature rows with %d feature columns", len(out), len(feature_cols))
         return out
 
-    # ---------- Label attachment ----------
-    def _attach_label_if_available(self, feats: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
-        cfg = self.cfg
-        supervision = {"enabled": False}
-        if not cfg.attach_label:
-            return feats, supervision
+    def _add_lags_and_rolls(self, daily: pd.DataFrame) -> pd.DataFrame:
+        if daily is None or daily.empty:
+            return daily
 
-        # ohlcv_path = Path(cfg.ohlcv_features_path)
-        # meta_path = Path(cfg.ohlcv_metadata_path)
-        ohlcv_path = self._load_ohlcv_features(self.cfg.ohlcv_features_path, self.cfg.ohlcv_filename)
-        meta_path = self._load_ohlcv_features(self.cfg.ohlcv_metadata_path, self.cfg.ohlcv_metadata_filename)
-        if not ohlcv_path or not meta_path:
-            logger.warning(
-                "attach_label=True but OHLCV feature/meta files not found: (%s, %s) → skipping label merge",
-                ohlcv_path,
-                meta_path,
+        d = daily.copy()
+        d.sort_values(["symbol", "date"], inplace=True)
+
+        lag_cols = [
+            "polarity_wmean",
+            "polarity_mean",
+            "pos_ratio",
+            "neg_ratio",
+            "article_count",
+            "highrel_ratio",
+            "rel_score_mean",
+        ]
+
+        for k in range(1, int(self.cfg.lags) + 1):
+            for c in lag_cols:
+                d[f"{c}_lag_{k}"] = d.groupby("symbol")[c].shift(k)
+
+        # Simple rolling (using past info only)
+        # Example: 3-day and 5-day rolling weighted polarity
+        for w in (3, 5):
+            d[f"polarity_wmean_roll_{w}"] = d.groupby("symbol")["polarity_wmean"].transform(
+                lambda s: s.shift(1).rolling(w, min_periods=w).mean()
             )
-            return feats, supervision
+            d[f"article_count_roll_{w}"] = d.groupby("symbol")["article_count"].transform(
+                lambda s: s.shift(1).rolling(w, min_periods=w).mean()
+            )
 
-        ohlcv = pd.read_parquet(ohlcv_path)
-        ohlcv["date"] = _ensure_datetime_date(ohlcv["date"])
-        meta = json.loads(meta_path.read_text())
-        label_col = _infer_label_col(meta, cfg.label_col_fallback)
-        if label_col not in ohlcv.columns:
-            logger.warning("Label column %s missing in OHLCV features → skipping labels", label_col)
-            return feats, supervision
+        return d
+    
 
-        labels = ohlcv[["symbol", "date", label_col]].dropna(subset=[label_col]).copy()
-        merged = feats.merge(labels, on=["symbol", "date"], how="inner")
-        logger.info("Attached labels using column %s; rows reduced from %d to %d", label_col, len(feats), len(merged))
-        supervision = {
-            "enabled": True,
-            "label_col_name": label_col,
-            "source": {
-                "ohlcv_features_path": cfg.ohlcv_features_path,
-                "ohlcv_metadata_path": cfg.ohlcv_metadata_path,
-            },
-            "horizon_days": meta.get("horizon_days"),
-            "splits": meta.get("splits"),
-        }
-        return merged, supervision
+    def _generate_metadata(self, feats_dt: pd.DataFrame) -> Dict[str, Any]:
+        """Generate metadata JSON for multi-symbol news sentiment features.
 
-    # ---------- Output ----------
-    def _write_outputs(self, feats: pd.DataFrame, supervision: Dict[str, object]) -> Dict[str, str]:
-        feat_key = f"{self.cfg.output_key_prefix}/{self.cfg.output_features_filename}"
-        meta_key = f"{self.cfg.output_key_prefix}/{self.cfg.output_metadata_filename}"
+        - Avoids referencing non-existent config fields.
+        - Includes OHLCV-driven supervision (label/splits/horizon) if available.
+        - Adds per-split per-symbol row counts for quick sanity checks.
+        """
+        cfg = self.cfg
+        meta_path = self._load_ohlcv_features(self.cfg.ohlcv_features_path, self.cfg.ohlcv_filename)
 
-        feature_cols = [c for c in feats.columns if c not in {"symbol", "date"}]
-        meta = {
-            "name": "news_sentiment_features",
-            "symbols": self.cfg.symbols,
-            "year_range": [self.cfg.start_year, self.cfg.end_year],
-            "feature_cols": feature_cols,
-            "n_features": len(feature_cols),
-            "n_rows": int(len(feats)),
+        # Try to load OHLCV metadata (for horizon_days / splits / label column)
+        supervision: Dict[str, Any] = {"enabled": False}
+        splits = None
+        try:
+            if meta_path and meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+                label_col = meta.get("label_col") or meta.get("label_col_name") or meta.get("label")
+                if not label_col and meta.get("horizon_days"):
+                    label_col = f"y_up_{meta['horizon_days']}d"
+                splits = meta.get("splits")
+                supervision = {
+                    "enabled": True,
+                    "label_col_name": label_col,
+                    "source": {
+                        "ohlcv_features_path": getattr(cfg, "ohlcv_features_path", None),
+                        "ohlcv_metadata_path": getattr(cfg, "ohlcv_metadata_path", None),
+                    },
+                    "horizon_days": meta.get("horizon_days"),
+                    "splits": splits,
+                }
+        except Exception as e:
+            logger.warning("Could not load OHLCV supervision metadata: %s", e)
+
+        # Optional per-split per-symbol counts
+        per_symbol_counts = None
+        try:
+            if splits:
+                def _count_in(split):
+                    s = pd.to_datetime(split["start"])
+                    e = pd.to_datetime(split["end"])
+                    mask = (feats_dt["date"] >= s) & (feats_dt["date"] <= e)
+                    return feats_dt.loc[mask].groupby("symbol").size().to_dict()
+                per_symbol_counts = {k: _count_in(v) for k, v in splits.items()}
+        except Exception:
+            per_symbol_counts = None
+
+        return {
+            "pipeline": "news_sentiment_feature_build",
+            "created_utc": datetime.datetime.utcnow().isoformat() + "Z",
+            "symbols": cfg.symbols,
+            "start_year": cfg.start_year,
+            "end_year": cfg.end_year,
+            "lags": cfg.lags,
+            "lookback_days": getattr(cfg, "lookback_days", None),
+            "relevance_threshold": getattr(cfg, "relevance_threshold", None),
+            "finbert_model_name": self.finbert_cfg.model_name,
+            "n_rows": int(len(feats_dt)),
+            "n_days": int(feats_dt["date"].nunique()),
             "supervision": supervision,
-            "feature_engineering": {
-                "lags": self.cfg.lags,
-                "roll_windows": list(self.cfg.roll_windows),
-                "shock_window": self.cfg.shock_window,
-                "shock_z": self.cfg.shock_z,
-                "causal": True,
-                "note": "Lag/roll/shock features rely on shift(1) so they only depend on prior days.",
-            },
-            "scoring": {
-                "score_mode": self.cfg.score_mode,
-                "batch_size": self.cfg.finbert_batch_size,
-                "max_length": self.cfg.finbert_max_length,
-                "device": self.cfg.finbert_device,
-            },
+            "per_symbol_counts": per_symbol_counts,
         }
-        payload = json.dumps(meta, indent=2)
-        logger.debug("Metadata prepared with %d feature columns", len(feature_cols))
 
+    def build(self) -> pd.DataFrame:
+        frames: List[pd.DataFrame] = []
+        for symbol in self.cfg.symbols:
+            for year in range(self.cfg.start_year, self.cfg.end_year + 1):
+                df_y = self._load_news_year(symbol, year)
+                if not df_y.empty:
+                    frames.append(df_y)
+
+        if not frames:
+            raise RuntimeError("No processed NEWS found for the requested symbols/years.")
+
+        news = pd.concat(frames, ignore_index=True)
+        news.sort_values(["symbol", "date"], inplace=True)
+
+        # score sentiment if needed
+        news = self._score_finbert_if_needed(news)
+
+        daily = self._daily_aggregate(news)
+        daily = self._add_lags_and_rolls(daily)
+
+        # Feast expects event timestamp column
+        daily["date"] = pd.to_datetime(daily["date"]).dt.tz_localize(None)
+
+        return daily
+
+    def write_outputs(self, feats: pd.DataFrame) -> Dict[str, str]:
+        feat_key = _output_key(self.cfg.output_key_prefix, self.cfg.output_features_filename)
+        meta_key = _output_key(self.cfg.output_key_prefix, self.cfg.output_metadata_filename)
+
+        meta = self._generate_metadata(feats)
         logger.info("Writing NEWS features to s3://%s/%s", self.cfg.features_bucket, feat_key)
         self._write_local_and_s3(
             filename=self.cfg.output_features_filename,
             s3_key=feat_key,
             write_func=lambda path: feats.to_parquet(path, index=False),
         )
+
+        payload = json.dumps(meta, indent=2)
 
         logger.info("Writing NEWS metadata to s3://%s/%s", self.cfg.features_bucket, meta_key)
         self._write_local_and_s3(
@@ -456,82 +463,37 @@ class NewsSentimentFeatureBuildPipeline:
 
         return {"features": feat_key, "metadata": meta_key}
 
-    def _write_local_and_s3(self, filename: str, s3_key: str, write_func: Callable[[Path], None]) -> None:
-        """Write artifact locally (for DVC) and upload the same temp file to S3."""
-        with tempfile.TemporaryDirectory() as td:
-            tmp_path = Path(td) / filename
-            logger.debug("Writing %s to temp path %s", filename, tmp_path)
-            write_func(tmp_path)
-
-            local_path = self.local_dir / filename
-            logger.debug("Writing %s to local path %s", filename, local_path)
-            write_func(local_path)
-
-            if self.cfg.upload_to_s3:
-                logger.debug("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
-                self.s3_features.upload_file(tmp_path, s3_key)
-            else:
-                logger.info("Skipping upload for %s because upload_to_s3=False", filename)
-
-    # ---------- Orchestration ----------
     def run(self) -> None:
-        news = self._load_all_news()
-        logger.info(
-            "Loaded processed news: %d rows across symbols=%s (date range %s → %s)",
-            len(news),
-            self.cfg.symbols,
-            news["date"].min(),
-            news["date"].max(),
-        )
-
-        news = self._ensure_sentiment_columns(news)
-        feats = self._build_daily_features(news)
-        logger.info("Daily features shape: rows=%d cols=%d", len(feats), len(feats.columns))
-
-        merged, supervision = self._attach_label_if_available(feats)
-        if supervision.get("enabled"):
-            logger.info(
-                "Attached label column %s; merged rows=%d",
-                supervision["label_col_name"],
-                len(merged),
-            )
-        else:
-            logger.info("Label attachment disabled or unavailable; rows=%d", len(merged))
-
-        out = self._write_outputs(merged, supervision)
-        logger.info(
-            "NEWS sentiment feature build complete. Features=%s Metadata=%s",
-            out["features"],
-            out["metadata"],
-        )
+        logger.info("Starting NEWS sentiment feature build ingestion...")
+        feats = self.build()
+        out = self.write_outputs(feats)
+        logger.info("NEWS sentiment feature build complete. Features=%s Metadata=%s", out["features"], out["metadata"])
 
 
-# -----------------------------
-# CLI
-# -----------------------------
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build daily sentiment features from processed news.")
-    parser.add_argument("--symbols", required=True, help="Comma-separated list, e.g., TCS,INFY")
-    parser.add_argument("--start-year", required=True, type=int)
-    parser.add_argument("--end-year", required=True, type=int)
-    parser.add_argument("--s3-processed-bucket", required=True, help="Your S3 processed bucket (e.g., dissertation-databucket-processed)")
-    parser.add_argument("--s3-features-bucket", required=True, help="Your S3 features bucket (e.g., dissertation-databucket-dvcstore)")
+    p = argparse.ArgumentParser(description="Build daily sentiment features from processed news.")
+    p.add_argument("--symbols", required=True, help="Comma-separated list, e.g., TCS,INFY")
+    p.add_argument("--start-year", type=int, required=True)
+    p.add_argument("--end-year", type=int, required=True)
+    p.add_argument("--s3-processed-bucket", required=True,
+                help="Your S3 processed bucket (e.g., dissertation-databucket-processed)")
+    p.add_argument("--s3-features-bucket", required=True,
+                help="Your S3 features bucket (e.g., dissertation-databucket-dvcstore)")
+    p.add_argument("--score-mode", choices=["finbert", "skip"], default="skip")
+    p.add_argument("--finbert-batch-size", type=int, default=16)
+    p.add_argument("--finbert-max-length", type=int, default=128)
+    p.add_argument("--finbert-device", type=int, default=-1)
+    p.add_argument("--horizon-days", type=int, default=5)
 
-    parser.add_argument("--score-mode", default="finbert", choices=["finbert", "skip"])
-    parser.add_argument("--finbert-batch-size", type=int, default=16)
-    parser.add_argument("--finbert-max-length", type=int, default=128)
-    parser.add_argument("--finbert-device", type=int, default=-1)
+    p.add_argument("--lags", type=int, default=5)
 
-    parser.add_argument("--lags", type=int, default=5)
-    parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
-
-    # parser.add_argument("--attach-label", action="store_true", help="Enable attaching OHLCV-derived label column")
-    # parser.add_argument("--no-attach-label", action="store_true", help="Disable label attachment")
-    # parser.add_argument("--ohlcv-features-path", default="data/features/ohlcv_features.parquet")
-    # parser.add_argument("--ohlcv-metadata-path", default="data/features/ohlcv_feature_metadata.json")
-
-    # parser.add_argument("--no-s3-upload", action="store_true", help="Skip uploading outputs to S3")
-    return parser.parse_args()
+    p.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        help="Logging level (e.g. DEBUG, INFO). Defaults to LOG_LEVEL env or INFO.",
+    )
+    return p.parse_args()
 
 
 def main() -> None:
@@ -542,22 +504,18 @@ def main() -> None:
         processed_bucket=args.s3_processed_bucket,
         features_bucket=args.s3_features_bucket,
         symbols=[s.strip() for s in args.symbols.split(",") if s.strip()],
-        start_year=int(args.start_year),
-        end_year=int(args.end_year),
+        start_year=args.start_year,
+        end_year=args.end_year,
         score_mode=args.score_mode,
         finbert_batch_size=args.finbert_batch_size,
         finbert_max_length=args.finbert_max_length,
         finbert_device=args.finbert_device,
-        lags=int(args.lags),
-        # attach_label=(False if args.no_attach_label else True),
-        # ohlcv_features_path=args.ohlcv_features_path,
-        # ohlcv_metadata_path=args.ohlcv_metadata_path,
-        # upload_to_s3=not args.no_s3_upload,
+        lags=args.lags,
+        target_horizon_days=args.horizon_days,
+        label_col_name=f"y_up_{args.horizon_days}d",
     )
 
-    logger.info("Config: %s", json.dumps(asdict(cfg), indent=2, default=str))
-    pipeline = NewsSentimentFeatureBuildPipeline(cfg)
-    pipeline.run()
+    NewsSentimentFeatureBuildIngestor(cfg).run()
 
 
 if __name__ == "__main__":
