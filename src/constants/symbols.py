@@ -1,10 +1,27 @@
 # Symbols Listed in NSE (National Stock Exchange of India)
 NSE_SYMBOLS = [
-    "RELIANCE",
-    "TCS",
+    "ADANIPORTS",
+    "AXISBANK",
+    "BPCL",
+    "BRITANNIA",
+    "HCLTECH",
     "HDFCBANK",
-    "INFY",
+    "HINDUNILVR",
     "ICICIBANK",
+    "INFY",
+    "IOC",
+    "ITC",
+    "KOTAKBANK",
+    "LT",
+    "NESTLEIND",
+    "ONGC",
+    "RELIANCE",
+    "SBIN",
+    "SUNPHARMA",
+    "TATASTEEL",
+    "TCS",
+    "WIPRO",
+    "INDUSINDBK",
 ]
 
 
