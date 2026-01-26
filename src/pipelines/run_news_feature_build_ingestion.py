@@ -339,20 +339,28 @@ class NewsSentimentFeatureBuildPipeline:
             out[f"article_count_roll_mean_{window}"] = shifted_ac.rolling(window, min_periods=max(2, window // 2)).mean()
 
         for col in ["polarity_wmean", "sent_cov", "article_count"]:
-            mu = out.groupby("symbol", sort=False)[col].shift(1).rolling(
-                cfg.shock_window,
-                min_periods=max(5, cfg.shock_window // 4),
-            ).mean()
-            sigma = out.groupby("symbol", sort=False)[col].shift(1).rolling(
-                cfg.shock_window,
-                min_periods=max(5, cfg.shock_window // 4),
-            ).std()
-            z = (out[col] - mu) / sigma.replace(0, np.nan)
+            # Causal z-score: use ONLY information available strictly before the current day
+            # x_t uses the previous day's value (shift(1)); rolling stats are computed on that shifted series per symbol.
+            x = out.groupby("symbol", sort=False)[col].shift(1)
+
+            mu = (
+                x.groupby(out["symbol"], sort=False)
+                .rolling(cfg.shock_window, min_periods=max(5, cfg.shock_window // 4))
+                .mean()
+                .reset_index(level=0, drop=True)
+            )
+            sigma = (
+                x.groupby(out["symbol"], sort=False)
+                .rolling(cfg.shock_window, min_periods=max(5, cfg.shock_window // 4))
+                .std()
+                .reset_index(level=0, drop=True)
+            )
+
+            z = (x - mu) / sigma.replace(0, np.nan)
             z = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
             out[f"{col}_z{cfg.shock_window}"] = z
             out[f"{col}_pos_shock"] = (z > cfg.shock_z).astype(float)
             out[f"{col}_neg_shock"] = (z < -cfg.shock_z).astype(float)
-
         feature_cols = [c for c in out.columns if c not in {"symbol", "date"}]
         out[feature_cols] = out[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         logger.info("Constructed %d daily feature rows with %d feature columns", len(out), len(feature_cols))
