@@ -5,9 +5,7 @@ requests
 numpy
 pandas
 pyarrow
-scikit-learn
-s3fs>=2023.12.2
-sentence-transformers>=2.2.2
+# scikit-learn
+# s3fs>=2023.12.2
+# sentence-transformers>=2.2.2 installed separately in sentiment pipeline
 # torch installed per-environment (CI/Colab) to control CPU vs CUDA wheel
-tqdm
-yfinance
