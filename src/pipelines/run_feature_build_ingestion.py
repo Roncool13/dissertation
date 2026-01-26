@@ -225,57 +225,54 @@ class OhlcvFeatureBuildIngestor:
         test_year = self.cfg.end_year
         val_year = test_year - 1
 
-        train_start = date(self.cfg.start_year, 1, 1)
-        train_end = date(val_year - 1, 12, 31)
-
-        val_start = date(val_year, 1, 1)
-        val_end = date(val_year, 12, 31)
-
-        test_start = date(test_year, 1, 1)
-        test_end = date(test_year, 12, 31)
-
-        logger.debug(
-            "Computed split windows -> train:%s-%s val:%s-%s test:%s-%s",
-            train_start,
-            train_end,
-            val_start,
-            val_end,
-            test_start,
-            test_end,
-        )
-
+        # Split boundaries (global, then applied per-symbol at training time)
         splits = {
-            "scheme": "global_time_split_v1",
-            "train": {
-                "start": train_start.isoformat(),
-                "end": train_end.isoformat(),
-            },
-            "val": {
-                "start": val_start.isoformat(),
-                "end": val_end.isoformat(),
-            },
-            "test": {
-                "start": test_start.isoformat(),
-                "end": test_end.isoformat(),
-            },
+            "train": {"start": f"{self.cfg.start_year}-01-01", "end": f"{val_year-1}-12-31"},
+            "val":   {"start": f"{val_year}-01-01", "end": f"{val_year}-12-31"},
+            "test":  {"start": f"{test_year}-01-01", "end": f"{test_year}-12-31"},
+        }
+
+        # Per-symbol row counts for each split (useful for filtering symbols with insufficient history)
+        feats_dt = feats.copy()
+        feats_dt["date"] = pd.to_datetime(feats_dt["date"])
+        symbols = sorted(feats_dt["symbol"].dropna().unique().tolist())
+
+        def _count_in(split):
+            s = pd.to_datetime(split["start"])
+            e = pd.to_datetime(split["end"])
+            mask = (feats_dt["date"] >= s) & (feats_dt["date"] <= e)
+            return feats_dt.loc[mask].groupby("symbol").size().to_dict()
+
+        per_symbol_counts = {
+            "train": _count_in(splits["train"]),
+            "val": _count_in(splits["val"]),
+            "test": _count_in(splits["test"]),
         }
 
         meta = {
-            "dataset": "ohlcv_features",
-            "symbols": self.cfg.symbols,
-            "start_year": self.cfg.start_year,
-            "end_year": self.cfg.end_year,
-            "horizon_days": self.cfg.horizon_days,
-            "lags": self.cfg.lags,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "dataset": {
+                "name": self.cfg.dataset_name,
+                "symbols": symbols,
+                "start_year": self.cfg.start_year,
+                "end_year": self.cfg.end_year,
+            },
+            "labeling": {
+                "enabled": bool(self.cfg.include_labels),
+                "horizon_days": int(self.cfg.horizon_days),
+                "label_col": self.cfg.label_col,
+            },
+            "splits": splits,
+            "per_symbol_counts": per_symbol_counts,
             "row_count": int(len(feats)),
             "columns": list(feats.columns),
-            "splits": splits,
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
         }
-        logger.debug(
-            "Metadata snapshot -> rows:%d columns:%d include_labels:%s",
+
+        logger.info(
+            "OHLCV feature metadata: rows=%s cols=%s symbols=%s labels=%s",
             meta["row_count"],
             len(meta["columns"]),
+            len(symbols),
             self.cfg.include_labels,
         )
         return meta
