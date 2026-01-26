@@ -81,7 +81,7 @@ jobs:
           # Force CPU wheel for GitHub Actions runners (faster + more reliable)
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          pip install "dvc[s3]"
+          pip install "dvc[s3]" "sentence-transformers>=2.2.2"
 
       - name: Build NEWS sentiment features (FinBERT)
         env:
