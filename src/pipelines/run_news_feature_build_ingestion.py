@@ -164,7 +164,7 @@ class NewsSentimentFeatureBuildIngestor:
             logger.info("Uploading %s to s3://%s/%s", filename, self.cfg.features_bucket, s3_key)
             self.s3_features.upload_file(tmp_path, s3_key)
 
-    def _load_ohlcv_features(self, key, filename):
+    def _load_ohlcv_data(self, key, filename):
         logger.debug("Attempting to download OHLCV artifact %s -> %s", key, filename)
         if not self.s3_features.object_exists(key):
             logger.warning(
@@ -361,7 +361,7 @@ class NewsSentimentFeatureBuildIngestor:
         - Adds per-split per-symbol row counts for quick sanity checks.
         """
         cfg = self.cfg
-        meta_path = self._load_ohlcv_features(self.cfg.ohlcv_features_path, self.cfg.ohlcv_filename)
+        meta_path = self._load_ohlcv_data(self.cfg.ohlcv_metadata_path, self.cfg.ohlcv_metadata_filename)
 
         # Try to load OHLCV metadata (for horizon_days / splits / label column)
         supervision: Dict[str, Any] = {"enabled": False}
@@ -464,6 +464,13 @@ class NewsSentimentFeatureBuildIngestor:
         return {"features": feat_key, "metadata": meta_key}
 
     def run(self) -> None:
+        logger.info("Adding pre-flight check")
+        logger.info("PRECHECK: Loading OHLCV features for supervision check...")
+        logger.info("PRECHECK: OHLCV features path: %s", repr(self.cfg.ohlcv_features_path))
+        logger.info("PRECHECK: OHLCV metadata path: %s", repr(self.cfg.ohlcv_metadata_path))
+        logger.info("PRECHECK: OHLCV features path exists: %s", self.s3_features.object_exists(self.cfg.ohlcv_features_path))
+        logger.info("PRECHECK: OHLCV metadata path exists: %s", self.s3_features.object_exists(self.cfg.ohlcv_metadata_path))
+        logger.info("PRECHECK complete.")
         logger.info("Starting NEWS sentiment feature build ingestion...")
         feats = self.build()
         out = self.write_outputs(feats)
