@@ -64,6 +64,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 14400
 
       - name: Cache pip + torch
         uses: actions/cache@v4
