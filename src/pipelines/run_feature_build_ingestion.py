@@ -252,7 +252,7 @@ class OhlcvFeatureBuildIngestor:
         meta = {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "dataset": {
-                "name": self.cfg.dataset_name,
+                "name": getattr(self.cfg, "dataset_name", "_".join([",".join(self.cfg.symbols), str(self.cfg.start_year), str(self.cfg.end_year)])),
                 "symbols": symbols,
                 "start_year": self.cfg.start_year,
                 "end_year": self.cfg.end_year,
@@ -260,7 +260,7 @@ class OhlcvFeatureBuildIngestor:
             "labeling": {
                 "enabled": bool(self.cfg.include_labels),
                 "horizon_days": int(self.cfg.horizon_days),
-                "label_col": self.cfg.label_col,
+                "label_col": getattr(self.cfg, "label_col", f"y_up_{self.cfg.horizon_days}d"),
             },
             "splits": splits,
             "per_symbol_counts": per_symbol_counts,
