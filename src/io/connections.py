@@ -47,7 +47,7 @@ class S3Connection:
                 )
                 return True
 
-            logger.error("Unexpected S3 HeadObject error for s3://%s/%s: %s", self.bucket, key, exc)
+            logger.error("Unexpected S3 HeadObject error for s3://%s/%s: %s", self.bucket, key, exc.response.get("Error", {}))
             raise
 
     def object_exists_with_pattern(self, prefix: str, pattern: str = None) -> bool:
@@ -104,7 +104,7 @@ class S3Connection:
                 )
                 return True
             
-            logger.error("Unexpected S3 ListObjects error for s3://%s/%s: %s", self.bucket, prefix, exc)
+            logger.error("Unexpected S3 ListObjects error for s3://%s/%s: %s", self.bucket, prefix, exc.response.get("Error", {}))
             raise
 
     def list_objects_with_pattern(self, prefix: str, pattern: str = None) -> list[str]:
@@ -143,7 +143,7 @@ class S3Connection:
             return matching_keys
             
         except ClientError as exc:
-            logger.error("Error listing objects at s3://%s/%s: %s", self.bucket, prefix, exc)
+            logger.error("Error listing objects at s3://%s/%s: %s", self.bucket, prefix, exc.response.get("Error", {}))
             raise
 
     def upload_file(self, local_path: str | Path, key: str) -> None:
