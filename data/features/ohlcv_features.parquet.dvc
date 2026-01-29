@@ -1,5 +1,5 @@
 outs:
-- md5: 9cc32028bbe4fc26a56a994e119b45f5
-  size: 562694
+- md5: a96a13f234c01f2910840a64fcff462b
+  size: 18245209
   hash: md5
   path: ohlcv_features.parquet
