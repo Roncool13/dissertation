@@ -1,5 +1,5 @@
 outs:
-- md5: 997c9a74da65f2823fa33904284a8b07
-  size: 4424
+- md5: 3b248d083d9c8c8e60864bac06d07a35
+  size: 2602
   hash: md5
   path: news_sentiment_feature_metadata.json
