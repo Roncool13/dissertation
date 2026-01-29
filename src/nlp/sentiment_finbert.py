@@ -85,13 +85,13 @@ def _load_finbert_pipeline(cfg: FinBertConfig):
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model_name,
             local_files_only=False,
-            resume_download=True,
+            # resume_download=True,  # REMOVED - not supported in transformers 5.x
             force_download=force,
         )
         model = AutoModelForSequenceClassification.from_pretrained(
             cfg.model_name,
             local_files_only=False,
-            resume_download=True,
+            # resume_download=True,  # REMOVED - not supported in transformers 5.x
             force_download=force,
         )
         return pipeline(
