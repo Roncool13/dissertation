@@ -215,13 +215,21 @@ def build_inputs_for_models(
         for c in sent_expected:
             if c not in merged.columns:
                 merged[c] = 0.0
-        merged[sent_expected] = merged[sent_expected].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        sent_num = [c for c in sent_expected if c not in key]
+        if sent_num:
+            merged[sent_num] = merged[sent_num].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     if pat_expected:
         for c in pat_expected:
             if c not in merged.columns:
                 merged[c] = 0.0
-        merged[pat_expected] = merged[pat_expected].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        pat_num = [c for c in pat_expected if c not in key]
+        if pat_num:
+            merged[pat_num] = merged[pat_num].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    # Ensure categorical keys are clean
+    if "symbol" in merged.columns:
+        merged["symbol"] = merged["symbol"].astype(str).fillna("UNK")
 
     # gate
     g = compute_gate_from_frame(merged)
@@ -238,6 +246,8 @@ def run_backtest_lite(
     pat_df: pd.DataFrame,
     label_col: str,
     threshold: float,
+    no_trade: bool,
+    delta: float,
     mode: str,
     m_ohlcv,
     m_sent,
@@ -283,9 +293,7 @@ def run_backtest_lite(
         p_up = p_fusion
         model_used = "Fusion(meta)"
 
-    pred = (p_up >= threshold).astype(int)
-    actual = df[label_col].astype(int).values
-    is_correct = (pred == actual)
+        # handled below (single-row section)
 
     out = df[["symbol","date",label_col]].copy()
     out.rename(columns={label_col: "actual"}, inplace=True)
@@ -297,6 +305,7 @@ def run_backtest_lite(
     out["p_fusion"] = p_fusion
     out["p_up"] = p_up
     out["pred"] = pred
+    out["traded"] = traded
     out["is_correct"] = is_correct
     return out
 
@@ -344,6 +353,9 @@ with st.sidebar:
     st.divider()
     st.header("Prediction")
     threshold = st.slider("Decision threshold (UP if p >= threshold)", 0.40, 0.60, 0.50, 0.01)
+
+    no_trade = st.checkbox("Enable NO-TRADE band around 0.5", value=False)
+    delta = st.slider("NO-TRADE half-width (|p-0.5| < δ)", 0.00, 0.10, 0.03, 0.005)
 
     st.caption("If you see 'always UP', try threshold 0.52+ or add a no-trade band.")
 
@@ -416,113 +428,133 @@ with tab_single:
             st.write("SENT expects:", sent_expected)
             st.write("PAT expects:", pat_expected)
             st.write("Fusion expects:", ["p_ohlcv","p_sent","p_pat","g_sent","p_ohlcv_x_sent"])
+if st.button("Predict", key="single_predict"):
+    d = pd.to_datetime(date)
 
-    if st.button("Predict", key="single_predict"):
-        d = pd.to_datetime(date)
+    row_ohlcv = get_row(ohlcv_df, symbol, d)
+    if row_ohlcv is None:
+        st.error(f"No OHLCV row for {symbol} on {d.date()}")
+        st.stop()
 
-        row_ohlcv = get_row(ohlcv_df, symbol, d)
-        if row_ohlcv is None:
-            st.error(f"No OHLCV row for {symbol} on {d.date()}")
-            st.stop()
+    row_sent = get_row(sent_df, symbol, d)  # may be None
+    row_pat  = get_row(pat_df,  symbol, d)
+    if row_pat is None:
+        row_pat = row_ohlcv.copy()
 
-        row_sent = get_row(sent_df, symbol, d)  # can be None on no-news days
-        row_pat  = get_row(pat_df,  symbol, d)
-        if row_pat is None:
-            row_pat = row_ohlcv.copy()
+    # Clean categorical key
+    if "symbol" in row_ohlcv.columns:
+        row_ohlcv["symbol"] = row_ohlcv["symbol"].astype(str).fillna("UNK")
+    if row_sent is not None and "symbol" in row_sent.columns:
+        row_sent["symbol"] = row_sent["symbol"].astype(str).fillna("UNK")
+    if "symbol" in row_pat.columns:
+        row_pat["symbol"] = row_pat["symbol"].astype(str).fillna("UNK")
 
-        # Actual label if available
-        actual = None
-        if label_col in row_ohlcv.columns and not pd.isna(row_ohlcv[label_col].iloc[0]):
-            actual = int(row_ohlcv[label_col].iloc[0])
+    # Actual label (if available)
+    actual = None
+    if label_col in row_ohlcv.columns and not pd.isna(row_ohlcv[label_col].iloc[0]):
+        actual = int(row_ohlcv[label_col].iloc[0])
 
-        # OHLCV
-        X_ohlcv = align_X(row_ohlcv, ohlcv_expected, "OHLCV")
-        p_ohlcv = float(clip01(proba(m_ohlcv, X_ohlcv))[0])
+    # ---- Expert probabilities ----
+    X_ohlcv = align_X(row_ohlcv, ohlcv_expected, "OHLCV")
+    p_ohlcv = float(clip01(proba(m_ohlcv, X_ohlcv))[0])
 
-        # Sentiment (neutral if missing)
-        if row_sent is None:
-            row_sent = pd.DataFrame({"symbol":[symbol], "date":[d]})
-        if sent_expected is not None:
-            for c in sent_expected:
-                if c not in row_sent.columns:
-                    row_sent[c] = 0.0
-            row_sent[sent_expected] = row_sent[sent_expected].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        X_sent = align_X(row_sent, sent_expected, "SENTIMENT")
-        p_sent = float(clip01(proba(m_sent, X_sent))[0])
+    # Sentiment: neutral row if missing
+    if row_sent is None:
+        row_sent = pd.DataFrame({"symbol": [symbol], "date": [d]})
+    if sent_expected is not None:
+        for c in sent_expected:
+            if c not in row_sent.columns:
+                row_sent[c] = 0.0
+        num_cols = [c for c in sent_expected if c not in ["symbol", "date"]]
+        if num_cols:
+            row_sent[num_cols] = row_sent[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    X_sent = align_X(row_sent, sent_expected, "SENTIMENT")
+    p_sent = float(clip01(proba(m_sent, X_sent))[0])
 
-        # Pattern
-        if pat_expected is not None:
-            for c in pat_expected:
-                if c not in row_pat.columns:
-                    row_pat[c] = 0.0
-            row_pat[pat_expected] = row_pat[pat_expected].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-        X_pat = align_X(row_pat, pat_expected, "PATTERN")
-        p_pat = float(clip01(proba(m_pat, X_pat))[0])
+    # Pattern
+    if pat_expected is not None:
+        for c in pat_expected:
+            if c not in row_pat.columns:
+                row_pat[c] = 0.0
+        num_cols = [c for c in pat_expected if c not in ["symbol", "date"]]
+        if num_cols:
+            row_pat[num_cols] = row_pat[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    X_pat = align_X(row_pat, pat_expected, "PATTERN")
+    p_pat = float(clip01(proba(m_pat, X_pat))[0])
 
-        g_sent = float(compute_gate_from_frame(row_sent)[0])
+    g_sent = float(compute_gate_from_frame(row_sent)[0])
 
-        meta = pd.DataFrame([{
+    meta = pd.DataFrame([{
+        "p_ohlcv": p_ohlcv,
+        "p_sent": p_sent,
+        "p_pat": p_pat,
+        "g_sent": g_sent,
+        "p_ohlcv_x_sent": p_ohlcv * p_sent,
+    }])
+    p_fusion = float(clip01(proba(m_fusion, meta[["p_ohlcv","p_sent","p_pat","g_sent","p_ohlcv_x_sent"]]))[0])
+
+    if model_choice == "OHLCV only":
+        p_up = p_ohlcv
+        model_used = "OHLCV"
+    else:
+        p_up = p_fusion
+        model_used = "Fusion(meta)"
+
+    # ---- Decision with optional NO-TRADE band ----
+    conf = abs(float(p_up) - 0.5)
+    if no_trade and (conf < float(delta)):
+        pred = -1
+    else:
+        pred = int(p_up >= float(threshold))
+
+    pred_label = "NO TRADE" if pred == -1 else ("UP" if pred == 1 else "DOWN")
+    st.success(f"Prediction using **{model_used}**: **{pred_label}** (p_up={p_up:.4f})")
+
+    with st.expander("Show expert probabilities (debug)"):
+        st.write({
             "p_ohlcv": p_ohlcv,
             "p_sent": p_sent,
             "p_pat": p_pat,
             "g_sent": g_sent,
-            "p_ohlcv_x_sent": p_ohlcv * p_sent,
-        }])
-        p_fusion = float(clip01(proba(m_fusion, meta[["p_ohlcv","p_sent","p_pat","g_sent","p_ohlcv_x_sent"]]))[0])
+            "p_fusion": p_fusion,
+            "threshold": float(threshold),
+            "no_trade": bool(no_trade),
+            "delta": float(delta),
+            "confidence(|p-0.5|)": float(conf),
+        })
 
-        if model_choice == "OHLCV only":
-            p_up = p_ohlcv
-            model_used = "OHLCV"
-        else:
-            p_up = p_fusion
-            model_used = "Fusion(meta)"
+    is_correct = None
+    if actual is not None and pred != -1:
+        is_correct = bool(pred == actual)
+        st.write(f"Actual: **{'UP' if actual==1 else 'DOWN'}** → {'✅ Correct' if is_correct else '❌ Incorrect'}")
+    elif actual is None:
+        st.info("Actual label missing/NaN for this row; history scoring will ignore it.")
+    else:
+        st.info("NO TRADE: row will not be counted towards accuracy.")
 
-        pred = int(p_up >= threshold)
-        st.success(f"Prediction using **{model_used}**: **{'UP' if pred==1 else 'DOWN'}** (p_up={p_up:.4f})")
-
-        with st.expander("Show expert probabilities (debug)"):
-            st.write({
-                "p_ohlcv": p_ohlcv,
-                "p_sent": p_sent,
-                "p_pat": p_pat,
-                "g_sent": g_sent,
-                "p_fusion": p_fusion,
-                "threshold": float(threshold),
-            })
-
-        # Compare actual
-        is_correct = None
-        if actual is not None:
-            is_correct = (pred == actual)
-            st.write(f"Actual: **{'UP' if actual==1 else 'DOWN'}** → {'✅ Correct' if is_correct else '❌ Incorrect'}")
-        else:
-            st.info("Actual label missing/NaN for this row; history scoring will ignore it.")
-
-        # Save to history
-        new_row = pd.DataFrame([{
-            "timestamp": pd.Timestamp.utcnow().isoformat(),
-            "model": model_used,
-            "symbol": symbol,
-            "date": d.date().isoformat(),
-            "p_up": float(p_up),
-            "pred": int(pred),
-            "actual": (int(actual) if actual is not None else None),
-            "is_correct": (bool(is_correct) if is_correct is not None else None),
-        }])
-        st.session_state["history"] = pd.concat([st.session_state["history"], new_row], ignore_index=True)
-
+    # Save to history
+    new_row = pd.DataFrame([{
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "model": model_used,
+        "symbol": symbol,
+        "date": d.date().isoformat(),
+        "p_up": float(p_up),
+        "pred": int(pred),
+        "actual": (int(actual) if actual is not None else None),
+        "is_correct": (bool(is_correct) if is_correct is not None else None),
+    }])
+    st.session_state["history"] = pd.concat([st.session_state["history"], new_row], ignore_index=True)
     st.subheader("Prediction history")
     hist = st.session_state["history"].copy()
-    st.dataframe(hist.tail(100), use_container_width=True)
+    st.dataframe(hist.tail(100), width='stretch')
     scored = hist.dropna(subset=["is_correct"]).copy()
     stats = history_stats(scored)
-
+    
     a, b, c, d = st.columns(4)
     a.metric("Total scored", stats["total"])
     b.metric("Correct", stats["correct"])
     c.metric("Incorrect", stats["incorrect"])
     d.metric("Accuracy", f"{stats['accuracy']*100:.2f}%" if stats["total"] > 0 else "N/A")
-
 # -----------------------
 # Tab 2: Backtest-lite (date range)
 # -----------------------
@@ -572,6 +604,8 @@ with tab_range:
                 pat_df=pat_df,
                 label_col=label_col,
                 threshold=float(threshold),
+                no_trade=bool(no_trade),
+                delta=float(delta),
                 mode=("OHLCV" if mode == "OHLCV" else "FUSION"),
                 m_ohlcv=m_ohlcv,
                 m_sent=m_sent,
@@ -586,14 +620,25 @@ with tab_range:
             st.warning("No scoreable rows (label missing) in this range.")
             st.stop()
 
-        # Metrics
-        acc = float(out["is_correct"].mean())
+        # Metrics (score ONLY traded rows if NO-TRADE is enabled)
         total = len(out)
-        st.success(f"Accuracy: **{acc*100:.2f}%** on **{total:,}** rows (threshold={threshold:.2f})")
-
-        # Debug: Are we always predicting UP?
-        pred_rate = float(out["pred"].mean())  # fraction of UP predictions
-        st.write(f"UP prediction rate: **{pred_rate*100:.2f}%**")
+        traded_mask = out["pred"] != -1
+        traded_n = int(traded_mask.sum())
+        coverage = traded_n / total if total else float("nan")
+        
+        if traded_n > 0:
+            acc_traded = float(out.loc[traded_mask, "is_correct"].mean())
+            up_rate_traded = float((out.loc[traded_mask, "pred"] == 1).mean())
+        else:
+            acc_traded = float("nan")
+            up_rate_traded = float("nan")
+        
+        st.success(
+            f"Traded accuracy: **{acc_traded*100:.2f}%** on **{traded_n:,}/{total:,}** rows "
+            f"(coverage={coverage*100:.2f}%, threshold={float(threshold):.2f}, "
+            f"{'NO-TRADE δ=' + str(float(delta)) if no_trade else 'no NO-TRADE'})"
+        )
+        st.write(f"UP prediction rate (traded only): **{up_rate_traded*100:.2f}%**")
 
         # Probability diagnostics
         st.write("Probability diagnostics:")
@@ -604,15 +649,22 @@ with tab_range:
         })
 
         # Confusion (simple)
-        cm = pd.crosstab(out["actual"], out["pred"], rownames=["Actual"], colnames=["Pred"], dropna=False)
+        cm = pd.crosstab(
+            out.loc[out["pred"] != -1, "actual"],
+            out.loc[out["pred"] != -1, "pred"],
+            rownames=["Actual"], colnames=["Pred"], dropna=False
+        )
         st.write("Confusion matrix (0=DOWN, 1=UP):")
-        st.dataframe(cm, use_container_width=True)
+        st.dataframe(cm, width='stretch')
+        if no_trade:
+            st.write(f"NO-TRADE count: **{int((out['pred'] == -1).sum()):,}**")
 
         # Plot: accuracy over time (rolling)
         st.subheader("Rolling accuracy (by date)")
         tmp = out.copy()
         tmp["date"] = pd.to_datetime(tmp["date"])
-        daily = tmp.groupby("date", as_index=False)["is_correct"].mean()
+        tmp_traded = tmp[tmp["pred"] != -1].copy()
+        daily = tmp_traded.groupby("date", as_index=False)["is_correct"].mean()
         daily["roll_20d"] = daily["is_correct"].rolling(20, min_periods=5).mean()
 
         import matplotlib.pyplot as plt
@@ -644,4 +696,4 @@ with tab_range:
         st.pyplot(plt)
 
         st.subheader("Sample rows")
-        st.dataframe(out.tail(200), use_container_width=True)
+        st.dataframe(out.tail(200), width='stretch')
