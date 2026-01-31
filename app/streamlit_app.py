@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 import dvc.api
+import boto3
 # -----------------------
 # Utility
 # -----------------------
@@ -157,10 +158,6 @@ if "history" not in st.session_state:
 #     df = pd.read_parquet(path)
 #     df["date"] = pd.to_datetime(df["date"])
 #     return df
-
-import os
-import boto3
-import streamlit as st
 
 @st.cache_resource
 def aws_assume_role_env():
