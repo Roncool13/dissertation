@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import mlflow
+import shutil
 import tempfile
 from pathlib import Path
 import dvc.api
-
 # -----------------------
 # Utility
 # -----------------------
@@ -159,26 +159,28 @@ if "history" not in st.session_state:
 #     return df
 
 @st.cache_data
-def load_parquet(path: str) -> pd.DataFrame:
+def load_parquet(path: str, repo: str = ".", rev: str | None = None) -> pd.DataFrame:
     path = str(path)
-    if not os.path.exists(path):
-        # Pull the file from DVC remote into a local cache location
-        # repo="." means "this repo" (the app is running inside your repo checkout)
-        cache_dir = Path(tempfile.gettempdir()) / "dvc_streamlit_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
 
-        local_target = cache_dir / Path(path).name
+    # If file already exists locally, use it
+    if os.path.exists(path):
+        df = pd.read_parquet(path)
+        df["date"] = pd.to_datetime(df["date"])
+        return df
 
-        # Downloads tracked file `path` to `local_target`
-        dvc.api.get(
-            path=path,
-            repo=".",     # or your git repo URL if you don't deploy the full repo
-            rev=None,     # optionally: "main" / a commit hash / a tag
-            out=str(local_target),
-        )
-        path = str(local_target)
+    # Otherwise, stream from DVC remote via dvc.api.open() and save locally
+    cache_dir = Path(tempfile.gettempdir()) / "dvc_streamlit_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_parquet(path)
+    local_target = cache_dir / Path(path).name
+
+    # If we already fetched it earlier, reuse
+    if not local_target.exists():
+        with dvc.api.open(path=path, repo=repo, rev=rev, mode="rb") as src:
+            with open(local_target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+    df = pd.read_parquet(local_target)
     df["date"] = pd.to_datetime(df["date"])
     return df
 
