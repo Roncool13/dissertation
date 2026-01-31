@@ -158,6 +158,39 @@ if "history" not in st.session_state:
 #     df["date"] = pd.to_datetime(df["date"])
 #     return df
 
+import os
+import boto3
+import streamlit as st
+
+@st.cache_resource
+def aws_assume_role_env():
+    # Base creds come from Streamlit secrets
+    os.environ["AWS_ACCESS_KEY_ID"] = st.secrets["AWS_ACCESS_KEY_ID"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = st.secrets["AWS_SECRET_ACCESS_KEY"]
+    os.environ["AWS_DEFAULT_REGION"] = st.secrets.get("AWS_REGION", "us-east-1")
+
+    role_arn = st.secrets["ASSUME_ROLE_ARN"]
+    external_id = st.secrets.get("ASSUME_ROLE_EXTERNAL_ID")
+
+    sts = boto3.client("sts")
+    kwargs = {
+        "RoleArn": role_arn,
+        "RoleSessionName": "streamlit-dvc-session",
+        "DurationSeconds": 3600
+    }
+    if external_id:
+        kwargs["ExternalId"] = external_id
+
+    resp = sts.assume_role(**kwargs)
+    creds = resp["Credentials"]
+
+    # Set assumed-role creds into env so DVC/boto3 picks them up
+    os.environ["AWS_ACCESS_KEY_ID"] = creds["AccessKeyId"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = creds["SecretAccessKey"]
+    os.environ["AWS_SESSION_TOKEN"] = creds["SessionToken"]
+
+aws_assume_role_env()
+
 @st.cache_data
 def load_parquet(path: str, repo: str = ".", rev: str | None = None) -> pd.DataFrame:
     path = str(path)
