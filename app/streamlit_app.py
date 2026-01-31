@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import mlflow
+import tempfile
+from pathlib import Path
+import dvc.api
 
 # -----------------------
 # Utility
@@ -149,8 +152,32 @@ if "history" not in st.session_state:
 # -----------------------
 # Cache: data + models
 # -----------------------
+# @st.cache_data
+# def load_parquet(path: str) -> pd.DataFrame:
+#     df = pd.read_parquet(path)
+#     df["date"] = pd.to_datetime(df["date"])
+#     return df
+
 @st.cache_data
 def load_parquet(path: str) -> pd.DataFrame:
+    path = str(path)
+    if not os.path.exists(path):
+        # Pull the file from DVC remote into a local cache location
+        # repo="." means "this repo" (the app is running inside your repo checkout)
+        cache_dir = Path(tempfile.gettempdir()) / "dvc_streamlit_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        local_target = cache_dir / Path(path).name
+
+        # Downloads tracked file `path` to `local_target`
+        dvc.api.get(
+            path=path,
+            repo=".",     # or your git repo URL if you don't deploy the full repo
+            rev=None,     # optionally: "main" / a commit hash / a tag
+            out=str(local_target),
+        )
+        path = str(local_target)
+
     df = pd.read_parquet(path)
     df["date"] = pd.to_datetime(df["date"])
     return df
