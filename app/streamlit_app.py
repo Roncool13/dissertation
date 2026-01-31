@@ -319,19 +319,19 @@ with st.sidebar:
     # Model URIs (your exact names)
     ohlcv_uri = st.text_input(
         "OHLCV model URI",
-        value=os.environ.get("OHLCV_MODEL_URI", "models:/ohlcv_lr_multisym_2019_2023_persymnorm_true/Production")
+        value=os.environ.get("OHLCV_MODEL_URI", "models:/ohlcv_lr_multisym_2019_2023_persymnorm_true@production")
     )
     fusion_uri = st.text_input(
         "Fusion model URI",
-        value=os.environ.get("FUSION_MODEL_URI", "models:/fusion_meta_lr_multisym/Production")
+        value=os.environ.get("FUSION_MODEL_URI", "models:/fusion_meta_lr_multisym@production")
     )
     pat_uri = st.text_input(
         "Pattern model URI",
-        value=os.environ.get("PAT_MODEL_URI", "models:/pattern_lr_multisym_2019_2023/Production")
+        value=os.environ.get("PAT_MODEL_URI", "models:/pattern_lr_multisym_2019_2023@production")
     )
     sent_uri = st.text_input(
         "Sentiment model URI",
-        value=os.environ.get("SENT_MODEL_URI", "models:/sentiment_lr_baseline_multisym/Production")
+        value=os.environ.get("SENT_MODEL_URI", "models:/sentiment_lr_baseline_multisym@production")
     )
 
     st.divider()
