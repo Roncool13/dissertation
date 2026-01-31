@@ -3,3 +3,4 @@ mlflow
 pandas
 pyarrow
 scikit-learn
+dvc[s3]
