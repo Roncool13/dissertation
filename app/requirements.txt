@@ -4,4 +4,5 @@ mlflow
 pandas
 pyarrow
 scikit-learn
-dvc[s3]
+dvc>=3.0.0
+dvc-s3>=3.0.0
