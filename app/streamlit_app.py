@@ -304,6 +304,26 @@ def run_backtest_lite(
     out["g_sent"] = g
     out["p_fusion"] = p_fusion
     out["p_up"] = p_up
+
+    # ---- Decision logic (supports NO-TRADE band) ----
+    # traded = True if we actually take a directional view; False if NO-TRADE.
+    p_up_arr = np.asarray(p_up, dtype=float)
+    if no_trade:
+        traded = (np.abs(p_up_arr - 0.5) >= float(delta))
+    else:
+        traded = np.ones_like(p_up_arr, dtype=bool)
+
+    pred = (p_up_arr >= float(threshold)).astype(int)
+    # Mark NO-TRADE predictions as -1 for readability
+    pred = pred.astype(int)
+    pred[~traded] = -1
+
+    actual = np.asarray(out["actual"].values, dtype=int)
+    is_correct = (pred == actual)
+    # If no-trade, correctness is undefined
+    is_correct = is_correct.astype(object)
+    is_correct[~traded] = None
+
     out["pred"] = pred
     out["traded"] = traded
     out["is_correct"] = is_correct
@@ -328,19 +348,19 @@ with st.sidebar:
     # Model URIs (your exact names)
     ohlcv_uri = st.text_input(
         "OHLCV model URI",
-        value=os.environ.get("OHLCV_MODEL_URI", "models:/ohlcv_lr_multisym_2019_2023_persymnorm_true@production")
+        value=os.environ.get("OHLCV_MODEL_URI", "models:/ohlcv_lr_multisym_2019_2023_persymnorm_true/Production")
     )
     fusion_uri = st.text_input(
         "Fusion model URI",
-        value=os.environ.get("FUSION_MODEL_URI", "models:/fusion_meta_lr_multisym@production")
+        value=os.environ.get("FUSION_MODEL_URI", "models:/fusion_meta_lr_multisym/Production")
     )
     pat_uri = st.text_input(
         "Pattern model URI",
-        value=os.environ.get("PAT_MODEL_URI", "models:/pattern_lr_multisym_2019_2023@production")
+        value=os.environ.get("PAT_MODEL_URI", "models:/pattern_lr_multisym_2019_2023/Production")
     )
     sent_uri = st.text_input(
         "Sentiment model URI",
-        value=os.environ.get("SENT_MODEL_URI", "models:/sentiment_lr_baseline_multisym@production")
+        value=os.environ.get("SENT_MODEL_URI", "models:/sentiment_lr_baseline_multisym/Production")
     )
 
     st.divider()
@@ -543,7 +563,11 @@ if st.button("Predict", key="single_predict"):
         "actual": (int(actual) if actual is not None else None),
         "is_correct": (bool(is_correct) if is_correct is not None else None),
     }])
-    st.session_state["history"] = pd.concat([st.session_state["history"], new_row], ignore_index=True)
+    # Avoid FutureWarning on concat with empty/all-NA history
+    if st.session_state["history"].empty:
+        st.session_state["history"] = new_row.reset_index(drop=True)
+    else:
+        st.session_state["history"] = pd.concat([st.session_state["history"], new_row], ignore_index=True)
     st.subheader("Prediction history")
     hist = st.session_state["history"].copy()
     st.dataframe(hist.tail(100), width='stretch')
