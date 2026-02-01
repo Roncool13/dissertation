@@ -46,8 +46,27 @@ def align_X(df: pd.DataFrame, expected_cols: Optional[List[str]], name: str) -> 
         )
     return df[expected_cols].copy()
 
+
+def sanitize_X(X: pd.DataFrame) -> pd.DataFrame:
+    """Ensure no NaNs reach estimators.
+
+    - Numeric cols: coerce to float and fill NaN with 0.0
+    - Non-numeric cols (e.g., symbol): fill NaN with 'UNKNOWN'
+    """
+    X = X.copy()
+    for c in X.columns:
+        if pd.api.types.is_numeric_dtype(X[c]):
+            X[c] = pd.to_numeric(X[c], errors="coerce").astype(float).fillna(0.0)
+        else:
+            # keep categorical/text as object
+            X[c] = X[c].astype("object")
+            X.loc[X[c].isna(), c] = "UNKNOWN"
+    return X
+
+
 def proba(model, X: pd.DataFrame) -> np.ndarray:
     """Return P(y=1) for each row in X."""
+    X = sanitize_X(X)
     if hasattr(model, "predict_proba"):
         return np.asarray(model.predict_proba(X)[:, 1], dtype=float)
     pred = model.predict(X)
