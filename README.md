@@ -95,6 +95,48 @@ Each notebook logs metrics, artifacts, and model versions to MLflow/DAGsHub and 
 
 ---
 
+## Streamlit App (Interactive Predictor)
+The Streamlit UI in [app/streamlit_app.py](app/streamlit_app.py) provides:
+- **Single prediction** for a symbol/date (OHLCV-only or Fusion).
+- **Backtest-lite** across a date range with accuracy, coverage, and probability diagnostics.
+- **NO-TRADE band** controls around $p=0.5$ plus prediction history tracking.
+
+### App dependencies
+Use the pinned app dependencies from [app/requirements.txt](app/requirements.txt).
+
+### Run locally
+```
+pip install -r app/requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+### Configuration
+The app loads features via DVC (local or remote) and models from MLflow. Configure via environment variables or Streamlit secrets:
+
+**Streamlit secrets (required for DVC S3 access)**
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `ASSUME_ROLE_ARN`
+
+**Optional secrets**
+- `AWS_REGION` (default: us-east-1)
+- `ASSUME_ROLE_EXTERNAL_ID`
+
+**Environment variables (optional overrides)**
+- `MLFLOW_TRACKING_URI`
+- `OHLCV_MODEL_URI`
+- `FUSION_MODEL_URI`
+- `PAT_MODEL_URI`
+- `SENT_MODEL_URI`
+- `OHLCV_FEATS_PATH`
+- `SENT_FEATS_PATH`
+- `PAT_FEATS_PATH`
+- `LABEL_COL`
+
+The sidebar lets you override model URIs, data paths, thresholds, and the NO-TRADE band in real time.
+
+---
+
 ## Experiments & Tracking
 - **MLflow** is configured in each notebook (autolog disabled for GridSearchCV).
 - **DAGsHub** hosts MLflow experiments and registered models.
