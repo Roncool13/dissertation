@@ -216,3 +216,6 @@ notebooks/*.csv
 
 # Feast feature store
 feast_repo/data
+
+# DS Store files
+.DS_Store
