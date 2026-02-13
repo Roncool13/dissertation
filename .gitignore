@@ -213,3 +213,6 @@ notebooks/*.csv
 
 # Old files
 *.old
+
+# Feast feature store
+feast_repo/data
